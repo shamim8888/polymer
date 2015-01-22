@@ -1,0 +1,100 @@
+<!doctype html>
+<!--
+@license
+Copyright (c) 2014 The Polymer Project Authors. All rights reserved.
+This code may only be used under the BSD style license found at http://polymer.github.io/LICENSE.txt
+The complete set of authors may be found at http://polymer.github.io/AUTHORS.txt
+The complete set of contributors may be found at http://polymer.github.io/CONTRIBUTORS.txt
+Code distributed by Google as part of the polymer project is also
+subject to an additional IP rights grant found at http://polymer.github.io/PATENTS.txt
+-->
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="../../../webcomponentsjs/webcomponents-lite.js"></script>
+  <script src="../../../web-component-tester/browser.js"></script>
+  <link rel="import" href="../../polymer.html">
+  <link rel="import" href="configure-elements.html">
+</head>
+<body>
+
+  <x-configure></x-configure>
+
+  <x-configure-sdv></x-configure-sdv>
+
+  <x-configure-set></x-configure-set>
+
+  <x-configure content="attr"></x-configure>
+
+  <x-configure-host></x-configure-host>  
+
+  <x-configure-ensure></x-configure-ensure>
+
+  <x-configure-ensure content="attr"></x-configure-ensure>
+
+<script>
+
+  suite('configure', function() {
+
+    test('setting default value via prototype sets value and binding but avoids change handler', function() {
+      var e = document.querySelector('x-configure');
+      assert.equal(e.content, 'content', 'Property does not equal default value');
+      assert.equal(e.$.content.textContent, 'content', 'Bound value not propagated to dom');
+      assert.equal(e.changeHandlerCount, 0, 'Change handler incorrectly ran when default value set');
+    });
+
+    test('setting default value via setDefaultValue sets value and binding but avoids change handler', function() {
+      var e = document.querySelector('x-configure-sdv');
+      assert.equal(e.content, 'sdv', 'Property does not equal default value');
+      assert.equal(e.$.content.textContent, 'sdv', 'Bound value not propagated to dom');
+      assert.equal(e.changeHandlerCount, 0, 'Change handler incorrectly ran when default value set');
+    });
+
+    test('change handlers queued until readied', function() {
+      var e = document.querySelector('x-configure-set');
+      assert.equal(e.content, 'content', 'Property does not equal set value');
+      assert.equal(e.$.content.textContent, 'content', 'Set value not propagated to dom');
+      assert.equal(e.changeHandlerCount, 1, 'Change handler did not run when property set');
+      assert.equal(e.changeHandlerReadyState, true, 'Element not readied when change handler ran');
+    });
+
+    test('setting attribute overrides default value and calls change handlers', function() {
+      var e = document.querySelector('x-configure[content]');
+      assert.equal(e.content, 'attr', 'Property not deserialized');
+      assert.equal(e.$.content.textContent, 'attr', 'Attr value not propagated to dom');
+      assert.equal(e.changeHandlerCount, 1, 'Change handler did not run when property set via attribute');
+      assert.equal(e.changeHandlerReadyState, true, 'Element not readied when change handler ran');
+    });
+
+    test('setting value via binding overrides default value and calls change handler', function() {
+      var e = document.querySelector('x-configure-host');
+      assert.equal(e.content, 'host', 'Property does not equal default value');
+      assert.equal(e.$.child.content, 'host', 'Bound value not propagated to child');
+      assert.equal(e.changeHandlerCount, 0, 'Change handler incorrectly ran when default value set');
+      assert.equal(e.$.child.changeHandlerCount, 1, 'Change handler did not run when host set value');
+      assert.equal(e.$.child.changeHandlerReadyState, true, 'Element not readied when change handler ran');
+    });
+
+    test('ensureChangeHandler + default value = change handler called', function() {
+      var e = document.querySelector('x-configure-ensure');
+      assert.equal(e.content, 'ensured', 'Property does not equal default value');
+      assert.equal(e.changeHandlerCount, 1, 'Change handler did not run when ensureChangeHandler called');
+      assert.equal(e.changeHandlerReadyState, true, 'Element not readied when change handler ran');
+    });
+
+    test('ensureChangeHandler does not cause extra change when attr set', function() {
+      var e = document.querySelector('x-configure-ensure[content]');
+      assert.equal(e.content, 'attr', 'Property does not equal attribute value');
+      assert.equal(e.changeHandlerCount, 1, 'Change handler did not run extra when ensureChangeHandler called');
+      assert.equal(e.changeHandlerReadyState, true, 'Element not readied when change handler ran');
+    });
+
+    
+
+    
+
+  });
+
+</script>
+</body>
+</html>

@@ -103,6 +103,9 @@ subject to an additional IP rights grant found at http://polymer.github.io/PATEN
         if (this._annotes) {
           Annotations.preprocessBindAnnotations(this, this._annotes);
         }
+      },
+
+      _prepBindings: function() {
         Bind.createBindings(this);
       },
 

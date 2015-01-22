@@ -14,6 +14,7 @@ subject to an additional IP rights grant found at http://polymer.github.io/PATEN
 <link rel="import" href="src/features/standard/events.html">
 <link rel="import" href="src/features/standard/utils.html">
 <link rel="import" href="src/features/standard/bind.html">
+<link rel="import" href="src/features/standard/configure.html">
 <link rel="import" href="src/features/standard/notify-path.html">
 
 <link rel="import" href="src/layout.html">
@@ -33,6 +34,8 @@ subject to an additional IP rights grant found at http://polymer.github.io/PATEN
         this._prepPublished();
         this._prepAnnotations();
         this._prepBindEffects();
+        this._prepConfigure();
+        this._prepBindings();
         this._prepContent();
       },
 

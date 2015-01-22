@@ -1,0 +1,145 @@
+<!--
+@license
+Copyright (c) 2014 The Polymer Project Authors. All rights reserved.
+This code may only be used under the BSD style license found at http://polymer.github.io/LICENSE.txt
+The complete set of authors may be found at http://polymer.github.io/AUTHORS.txt
+The complete set of contributors may be found at http://polymer.github.io/CONTRIBUTORS.txt
+Code distributed by Google as part of the polymer project is also
+subject to an additional IP rights grant found at http://polymer.github.io/PATENTS.txt
+-->
+
+<script>
+
+
+  using(['Base', 'bind'], function(Base, Bind) {
+
+    // TODO(sjmiles): note 'true' argument at the bottom causing this feature
+    // to be inserted at the top of the features list. This was a quick-fix.
+
+    // TODO(sorvell): questionable...
+    // change `method` builder to use an indirection
+    Bind.addBuilders({
+
+      method: function(model, source, effect) {
+        return 'this._dispatchMethod(\'' + effect + '\', this._data.' + source + ', old);'
+      }
+    });
+
+    Base.addFeature({
+
+      // prototyping
+
+      _prepConfigure: function() {
+        // queue for changes while initializing
+        this._changes = [];
+        // collect defaults in the prototype.
+        this._defaults = {};
+        var fx$ = this._propertyEffects;
+        if (fx$) {
+          for (var n in fx$) {
+            // TODO(sorvell): may be slow but this protects us against
+            // running getters; this is questionable since we don't support
+            // defining getters for properties with effects
+            var d = Object.getOwnPropertyDescriptor(this, n);
+            if (d && d.value) {
+              this._defaults[n] = d.value;
+            }
+          }
+        }
+      },
+
+      // silently apply defaults
+      _beforeConfigure: function() {
+        for (var i in this._defaults) {
+          this.setDefaultValue(i, this._defaults[i]);
+        }
+      },
+
+      // set the value iff it is not already set
+      // do *not* run change handlers
+      setDefaultValue: function(property, value) {
+        if (!this.hasValue(property)) {
+          var o = this._silenceChanges;
+          this._silenceChanges = true;
+          this[property] = value;
+          this._silenceChanges = o;
+        }
+      },
+
+      // a value has been set for the given property
+      hasValue: function(property) {
+        return (property in this._data);
+      },
+
+      // the value of the given property is the default value.
+      hasDefaultValue: function(property) {
+        return (this._data[property] === this._defaults[property]);
+      },
+
+      // make sure to process the change handler for the given property
+      // even if only the default value has been set.
+      ensureChangeHandler: function(property) {
+        if (this.hasDefaultValue(property)) {
+          // call property change handler...
+          var n = this._changeHandlerForProperty(property);
+          var m = this[n];
+          if (m) {
+            m.call(this, this[property]);
+          }
+        }
+      },
+
+      // TODO(sorvell): shouldn't use bind directly.
+      _changeHandlerForProperty: function(property) {
+        return this.bind[property];
+      },
+
+      // helper called by property effectors which provides an 
+      // indirection for processing user change handlers.
+      // if `_silenceChanges` is set, the change is aborted
+      // if `_canProcessChanges` is set, call the change handler immediately,
+      // otherwise queue it for calling when the element is ready.
+      _dispatchMethod: function(effect, value, old) {
+        if (!this._silenceChanges) {
+          if (this._canTakeChanges) {
+            var method = this[effect];
+            if (method) {
+              method.call(this, value, old);
+            }
+          } else {
+            this._queueChange(effect, value, old);
+          }
+        }
+      },
+
+      // TODO(sorvell): push iff not in stack already?
+      _queueChange: function(effect, value, old) {
+        this._changes.push([effect, value, old]);
+      },
+
+      // turn on normal change processing
+      // and run any queued change handlers.
+      // TODO(sorvell): decide if we want to collapse multiple calls to the 
+      // same change handler.
+      _takeChanges: function() {
+        this._canTakeChanges = true;
+        var e$ = this._changes;
+        if (e$) {
+          for (var i=0, l=e$.length, e; (i<l) && (e=e$[i]); i++) {
+            this._dispatchMethod.apply(this, e);
+          }
+        }
+        this._changes = [];
+      },
+
+      // process change queue and turn on normal change processing
+      // just before ready (bottom-up)
+      _beforeReady: function() {
+        this._takeChanges();
+      }
+
+    }, true);
+
+  });
+
+</script>

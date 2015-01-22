@@ -1,0 +1,154 @@
+<template>
+  <span id="content">{{content}}</span>
+</template>
+<script>
+  Polymer({
+
+    is: 'x-configure',
+    
+    changeHandlerCount: 0,
+    content: 'content',
+
+    published: {
+      content: String
+    },
+    
+    bind: {
+      content: 'contentChanged'
+    },
+    
+    contentChanged: function() {
+      this.changeHandlerReadyState = this._readied;
+      this.changeHandlerCount++;
+    }
+  });
+</script>
+
+<template>
+  <span id="content">{{content}}</span>
+</template>
+<script>
+  Polymer({
+
+    is: 'x-configure-sdv',
+    
+    changeHandlerCount: 0,
+
+    published: {
+      content: String
+    },
+    
+    bind: {
+      content: 'contentChanged'
+    },
+
+    configure: function() {
+      this.setDefaultValue('content', 'sdv');
+    },
+    
+    contentChanged: function() {
+      this.changeHandlerReadyState = this._readied;
+      this.changeHandlerCount++;
+    }
+  });
+</script>
+
+<template>
+  <span id="content">{{content}}</span>
+</template>
+<script>
+  Polymer({
+
+    is: 'x-configure-set',
+    
+    changeHandlerCount: 0,
+    content: '?',
+    
+    bind: {
+      content: 'contentChanged'
+    },
+
+    configure: function() {
+      this.content = 'content';
+    },
+    
+    contentChanged: function() {
+      this.changeHandlerReadyState = this._readied;
+      this.changeHandlerCount++;
+    }
+  });
+</script>
+
+<template>
+  <span id="content">{{content}}</span>
+</template>
+<script>
+  Polymer({
+
+    is: 'x-configure-child',
+    
+    changeHandlerCount: 0,
+    content: 'child',
+    
+    bind: {
+      content: 'contentChanged'
+    },
+
+    contentChanged: function() {
+      this.changeHandlerReadyState = this._readied;
+      this.changeHandlerCount++;
+    }
+  });
+</script>
+
+<template>
+  <x-configure-child id="child" content="{{content}}"></x-configure-child>
+</template>
+<script>
+  Polymer({
+
+    is: 'x-configure-host',
+    
+    changeHandlerCount: 0,
+    content: 'host',
+    
+    bind: {
+      content: 'contentChanged'
+    },
+
+    contentChanged: function() {
+      this.changeHandlerReadyState = this._readied;
+      this.changeHandlerCount++;
+    }
+  });
+</script>
+
+<template>
+  <span id="content">{{content}}</span>
+</template>
+<script>
+  Polymer({
+
+    is: 'x-configure-ensure',
+    
+    changeHandlerCount: 0,
+    content: 'ensured',
+
+    published: {
+      content: String
+    },
+    
+    bind: {
+      content: 'contentChanged'
+    },
+
+    contentChanged: function() {
+      this.changeHandlerReadyState = this._readied;
+      this.changeHandlerCount++;
+    },
+
+    ready: function() {
+      this.ensureChangeHandler('content');
+    }
+  });
+</script>
