@@ -59,10 +59,10 @@ subject to an additional IP rights grant found at http://polymer.github.io/PATEN
       // do *not* run change handlers
       setDefaultValue: function(property, value) {
         if (!this.hasValue(property)) {
-          var o = this._silenceChanges;
-          this._silenceChanges = true;
+          var o = this._abortChanges;
+          this._abortChanges = true;
           this[property] = value;
-          this._silenceChanges = o;
+          this._abortChanges = o;
         }
       },
 
@@ -96,12 +96,12 @@ subject to an additional IP rights grant found at http://polymer.github.io/PATEN
 
       // helper called by property effectors which provides an 
       // indirection for processing user change handlers.
-      // if `_silenceChanges` is set, the change is aborted
-      // if `_canProcessChanges` is set, call the change handler immediately,
+      // if `_abortChanges` is set, the change is aborted
+      // if `_readied` is set, call the change handler immediately,
       // otherwise queue it for calling when the element is ready.
       _dispatchMethod: function(effect, value, old) {
-        if (!this._silenceChanges) {
-          if (this._canTakeChanges) {
+        if (!this._abortChanges) {
+          if (this._readied) {
             var method = this[effect];
             if (method) {
               method.call(this, value, old);
@@ -122,7 +122,6 @@ subject to an additional IP rights grant found at http://polymer.github.io/PATEN
       // TODO(sorvell): decide if we want to collapse multiple calls to the 
       // same change handler.
       _takeChanges: function() {
-        this._canTakeChanges = true;
         var e$ = this._changes;
         if (e$) {
           for (var i=0, l=e$.length, e; (i<l) && (e=e$[i]); i++) {
