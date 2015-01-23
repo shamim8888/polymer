@@ -17,7 +17,7 @@ subject to an additional IP rights grant found at http://polymer.github.io/PATEN
 <link rel="import" href="src/features/standard/configure.html">
 <link rel="import" href="src/features/standard/notify-path.html">
 
-<link rel="import" href="src/layout.html">
+<link rel="import" href="src/lib/layout.html">
 
 <script>
 
@@ -39,10 +39,8 @@ subject to an additional IP rights grant found at http://polymer.github.io/PATEN
         this._poolContent();
         this._setupConfigure();
         this._pushHost();
-        if (this._template) {
-          this._stampTemplate();
-          this._marshalAnnotationReferences();
-        }
+        this._stampTemplate();
+        this._marshalAnnotationReferences();
         this._popHost();
         this._setupInstanceBindings();
         this._setupBindListeners();
