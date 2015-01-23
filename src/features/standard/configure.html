@@ -29,30 +29,25 @@ subject to an additional IP rights grant found at http://polymer.github.io/PATEN
 
       // prototyping
 
-      _prepConfigure: function() {
-        // queue for changes while initializing
+      _setupConfigure: function() {
         this._changes = [];
-        // collect defaults in the prototype.
-        this._defaults = {};
-        var fx$ = this._propertyEffects;
-        if (fx$) {
-          for (var n in fx$) {
-            // TODO(sorvell): may be slow but this protects us against
-            // running getters; this is questionable since we don't support
-            // defining getters for properties with effects
-            var d = Object.getOwnPropertyDescriptor(this, n);
-            if (d && d.value) {
-              this._defaults[n] = d.value;
-            }
-          }
+      },
+
+      _configure: function() {
+        var d$ = this._defaults = this.configure();
+        for (var d in d$) {
+          this.setDefaultValue(d, d$[d]);
         }
       },
 
-      // silently apply defaults
-      _beforeConfigure: function() {
-        for (var i in this._defaults) {
-          this.setDefaultValue(i, this._defaults[i]);
-        }
+      _ready: function() {
+        this._readied = true;
+        this._takeChanges();
+        this.ready();
+      },
+
+      isDefaultChangeProperty: function(property) {
+        return this.getPublishInfo(property).defaultChange;
       },
 
       // set the value iff it is not already set
@@ -60,7 +55,9 @@ subject to an additional IP rights grant found at http://polymer.github.io/PATEN
       setDefaultValue: function(property, value) {
         if (!this.hasValue(property)) {
           var o = this._abortChanges;
-          this._abortChanges = true;
+          if (!this.isDefaultChangeProperty(property)) {
+            this._abortChanges = true;
+          }
           this[property] = value;
           this._abortChanges = o;
         }
