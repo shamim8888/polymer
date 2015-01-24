@@ -160,9 +160,10 @@ subject to an additional IP rights grant found at http://polymer.github.io/PATEN
           var effector = '_' + property + 'Effector';
           model[effector] = new Function('old', effects);
           // construct setter body
+          // TODO(sorvell): _abortEffectors needs to be an effect; just here for testing.
           var body  = [ 
             'var old = this._setData(\'' + property + '\', value);',
-            'if (value !== old) {',
+            'if ((value !== old) && !this._abortEffectors) {',
             '  this.' + effector + '(old);',
             '}'
           ].join('\n');

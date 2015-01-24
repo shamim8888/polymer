@@ -75,14 +75,14 @@ subject to an additional IP rights grant found at http://polymer.github.io/PATEN
       assert.equal(e.$.child.changeHandlerReadyState, true, 'Element not readied when change handler ran');
     });
 
-    test('ensureChangeHandler + default value = change handler called', function() {
+    test('ensure change + default value = change handler called', function() {
       var e = document.querySelector('x-configure-ensure');
       assert.equal(e.content, 'ensured', 'Property does not equal default value');
       assert.equal(e.changeHandlerCount, 1, 'Change handler did not run when ensureChangeHandler called');
       assert.equal(e.changeHandlerReadyState, true, 'Element not readied when change handler ran');
     });
 
-    test('ensureChangeHandler does not cause extra change when attr set', function() {
+    test('ensure change does not cause extra change when attr set', function() {
       var e = document.querySelector('x-configure-ensure[content]');
       assert.equal(e.content, 'attr', 'Property does not equal attribute value');
       assert.equal(e.changeHandlerCount, 1, 'Change handler did not run extra when ensureChangeHandler called');

@@ -22,6 +22,12 @@ subject to an additional IP rights grant found at http://polymer.github.io/PATEN
 
       method: function(model, source, effect) {
         return 'this._dispatchMethod(\'' + effect + '\', this._data.' + source + ', old);'
+      },
+
+      // TODO(sorvell): not used atm because couldn't sort to correct location
+      // instead monkey-patched setter.
+      squelcher: function(model, source, effect) {
+        return 'if (!this._allowEffectors) { return; }';
       }
     });
 
@@ -31,12 +37,41 @@ subject to an additional IP rights grant found at http://polymer.github.io/PATEN
 
       _setupConfigure: function() {
         this._changes = [];
+        this._abortEffectors = true;
+        this.configure();
+        this._captureDefaults();
+      },
+
+      _captureDefaults: function() {
+        this._defaults = {};
+        for (var i in this._data) {
+          this._defaults[i] = this._data[i];
+        }
       },
 
       _configure: function() {
-        var d$ = this._defaults = this.configure();
-        for (var d in d$) {
-          this.setDefaultValue(d, d$[d]);
+        // var d$ = this._defaults = this.configure();
+        // for (var d in d$) {
+        //   this.setDefaultValue(d, d$[d]);
+        // }
+        this._applyEffectors();
+        this._abortEffectors = false;
+      },
+
+      _applyEffectors: function() {
+        // run effectors!
+        for (var i in this._data) {
+          var defaultValue = this.hasDefaultValue(i);
+          if (defaultValue) {
+            var o = this._abortChanges;
+            if (!this.isDefaultChangeProperty(i)) {
+              this._abortChanges = true;
+            }
+          }
+          this['_' + i + 'Effector'](this[i]);
+          if (defaultValue) {
+            this._abortChanges = o;
+          }
         }
       },
 

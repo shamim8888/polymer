@@ -21,9 +21,10 @@
 
     configure: function() {
       // this === null
-      return {
-        content: 'content'
-      };
+      // return {
+      //   content: 'content'
+      // };
+      this.content = 'content';
     },
     
     contentChanged: function() {
@@ -55,9 +56,10 @@
     changeHandlerCount: 0,
 
     configure: function() {
-      return {
-        content: 'sdv'
-      };
+      // return {
+      //   content: 'sdv'
+      // };
+      this.content = 'sdv';
     },
     
     contentChanged: function() {
@@ -81,10 +83,6 @@
 
     changeHandlerCount: 0,
 
-    // configure: function() {
-    //   this.content = 'content';
-    // },
-    
     contentChanged: function() {
       this.changeHandlerReadyState = this._readied;
       this.changeHandlerCount++;
@@ -112,9 +110,11 @@
     changeHandlerCount: 0,
     
     configure: function() {
-      return {
-        content: 'child'
-      };
+      // return {
+      //   content: 'child'
+      // };
+
+      this.content = 'child';
     },
     
     contentChanged: function() {
@@ -139,9 +139,10 @@
     changeHandlerCount: 0,
     
     configure: function() {
-      return {
-        content: 'host'
-      };
+      // return {
+      //   content: 'host'
+      // };
+      this.content = 'host';
     },
 
     contentChanged: function() {
@@ -174,9 +175,10 @@
     changeHandlerCount: 0,
 
     configure: function() {
-      return {
-        content: 'ensured'
-      };
+      // return {
+      //   content: 'ensured'
+      // };
+      this.content = 'ensured';
     },
 
     contentChanged: function() {
