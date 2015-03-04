@@ -52,15 +52,47 @@ subject to an additional IP rights grant found at http://polymer.github.io/PATEN
 
       // _nodes[index][<binding.name=>]{{binding.value}}
       _bindAnnotationBinding: function(scope, binding, index) {
-        // capture the node index
-        binding.index = index;
-        // discover top-level property (model) from path
-        var path = binding.value;
-        var i = path.indexOf('.');
-        // [name=]{{model[.subpath]}}
-        var model = (i >= 0) ? path.slice(0, i) : path;
-        // add 'annotation' binding effect for property 'model'
-        Bind.addPropertyEffect(scope, model, 'annotation', binding);
+        var computed = binding.value.match(/(\w*)\((.*)\)/);
+        if (computed) {
+          var method = computed[1];
+          var args = computed[2].split(/[^\w]+/);
+          AnnotationsBind._bindComputedAnnotationBinding(scope, method, args, binding.name, index);
+        } else {
+          // capture the node index
+          binding.index = index;
+          // discover top-level property (model) from path
+          var path = binding.value;
+          var i = path.indexOf('.');
+          // [name=]{{model[.subpath]}}
+          var model = (i >= 0) ? path.slice(0, i) : path;
+          // add 'annotation' binding effect for property 'model'
+          Bind.addPropertyEffect(scope, model, 'annotation', binding);
+        }
+      },
+
+      _bindComputedAnnotationBinding: function(scope, method, args, property, index) {
+        if (!property) {
+          property = 'textContent';
+        }
+        if (property === 'style') {
+          property = 'style.cssText';
+        }
+        var debounceId = '\'_inline' + '_' + index + '_' + property + '\'';
+        var methodArgs = 'this._data.' + args.join(', this._data.');
+        var methodString = 'this.debounce(' + debounceId + ', function() {\n' +
+          '\t\tthis._nodes[' + index + '].' + property + 
+          ' = this.' + method + '(' + methodArgs + ');\n' +
+          '\t});';
+        var effect = {
+          property: property,
+          index: index,
+          args: args,
+          methodName: method,
+          methodString: methodString
+        };
+        for (var i=0; i<args.length; i++) {
+          Bind.addPropertyEffect(scope, args[i], 'computedAnnotation', effect);
+        }
       },
 
       // concretize `_nodes` map (annotation based)

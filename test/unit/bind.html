@@ -183,6 +183,17 @@ suite('single-element binding effects', function() {
     });
   });
 
+  test('annotated computed property', function(done) {
+    el.value = 20;
+    el.add = 40;
+    el.divide = 3;
+    setTimeout(function() {
+      assert.equal(el.$.boundChild.computedInline, 20, 'computedInline not correct');
+      assert.equal(el.$.boundChild.computedInline2, 20, 'computedInline2 not correct');
+      done();
+    });
+  });  
+
 });
 
 </script>
