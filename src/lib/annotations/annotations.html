@@ -114,8 +114,12 @@ subject to an additional IP rights grant found at http://polymer.github.io/PATEN
         bindings: [],
         events: []
       };
+      // TODO(sjmiles): ad hoc, this whole system needs to be pluggable
+      if (element.localName === 'content') {
+        annote.content = true;
+      }
       this._parseChildNodesAnnotations(element, annote, list);
-      // TODO(sjmiles): is this for non-ELEMENT nodes? If so, we should
+      // TODO(sjmiles): is this test for non-ELEMENT nodes? If so, we should
       // change the contract of this method, or filter these out above.
       if (element.attributes) {
         this._parseNodeAttributeAnnotations(element, annote, list);
@@ -123,11 +127,16 @@ subject to an additional IP rights grant found at http://polymer.github.io/PATEN
         // leveraging annotator's tree walk.
         // Consider adding an node callback registry and moving specific 
         // processing out of this module.
+        // TODO(sjmiles): not actually annotation work, suggests we should
+        // make pluggable tree walk, then plug in annotator and element prep
         if (this.prepElement) {
           this.prepElement(element);
         }
       }
-      if (annote.bindings.length || annote.events.length || annote.id) {
+      if (annote.bindings.length || 
+          annote.events.length || 
+          annote.id ||
+          annote.content) {
         list.push(annote);
       }
       return annote;

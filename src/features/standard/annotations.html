@@ -140,7 +140,7 @@ TODO(sjmiles): this module should produce either syntactic metadata
     _marshalAnnotationReferences: function() {
       if (this._template) {
         this._marshalTemplateContent();
-        this._marshalIdNodes();
+        this._marshalSpecialNodes();
         this._marshalAnnotatedNodes();
         this._marshalAnnotatedListeners();
       }
@@ -159,11 +159,16 @@ TODO(sjmiles): this module should produce either syntactic metadata
     },
 
     // construct `$` map (from id annotations)
-    _marshalIdNodes: function() {
+    // construct `_contentNodes` list (from content annotations)
+    _marshalSpecialNodes: function() {
       this.$ = {};
+      this._contentNodes = [];
       this._annotes.forEach(function(a) {
         if (a.id) {
           this.$[a.id] = this.findAnnotatedNode(this.root, a);
+        }
+        if (a.content) {
+          this._contentNodes.push(this.findAnnotatedNode(this.root, a));
         }
       }, this);
     },
