@@ -1,0 +1,4056 @@
+<!--
+@license
+Copyright (c) 2014 The Polymer Project Authors. All rights reserved.
+This code may only be used under the BSD style license found at http://polymer.github.io/LICENSE.txt
+The complete set of authors may be found at http://polymer.github.io/AUTHORS.txt
+The complete set of contributors may be found at http://polymer.github.io/CONTRIBUTORS.txt
+Code distributed by Google as part of the polymer project is also
+subject to an additional IP rights grant found at http://polymer.github.io/PATENTS.txt
+--><html><head><meta charset="UTF-8"><link rel="import" href="polymer-mini.html">
+
+<script>
+(function(scope) {
+
+  function withDependencies(task, depends) {
+    depends = depends || [];
+    if (!depends.map) {
+      depends = [depends];
+    }
+    return task.apply(this, depends.map(marshal));
+  }
+
+  function module(name, dependsOrFactory, moduleFactory) {
+    var module = null;
+    switch (arguments.length) {
+      case 0:
+        return;
+      case 2:
+        // dependsOrFactory is `factory` in this case
+        module = dependsOrFactory.apply(this);
+        break;
+      default:
+        // dependsOrFactory is `depends` in this case
+        module = withDependencies(moduleFactory, dependsOrFactory);
+        break;
+    }
+    modules[name] = module;
+  };
+
+  function marshal(name) {
+    return modules[name];
+  }
+
+  var modules = {};
+
+  var using = function(depends, task) {
+    withDependencies(task, depends);
+  };
+
+  // exports
+
+  scope.marshal = marshal;
+  // `module` confuses commonjs detectors
+  scope.modulate = module;
+  scope.using = using;
+
+})(this);
+</script>
+<script>
+/**
+ * Scans a template to produce an annotation list that that associates
+ * metadata culled from markup with tree locations 
+ * metadata and information to associate the metadata with nodes in an instance.
+ *
+ * Supported expressions include:
+ *
+ * Double-mustache annotations in text content. The annotation must be the only
+ * content in the tag, compound expressions are not supported.
+ *
+ *     <[tag]>{{annotation}}<[tag]>
+ *
+ * Double-escaped annotations in an attribute, either {{}} or [[]].
+ *
+ *     <[tag] someAttribute="{{annotation}}" another="[[annotation]]"><[tag]>
+ *
+ * `on-` style event declarations.
+ *
+ *     <[tag] on-<event-name>="annotation"><[tag]>
+ *
+ * Note that the `annotations` feature does not implement any behaviors
+ * associated with these expressions, it only captures the data.
+ *
+ * Generated data-structure:
+ * 
+ *     [
+ *       {
+ *         id: '<id>',
+ *         events: [
+ *           {
+ *             name: '<name>'
+ *             value: '<annotation>'
+ *           }, ...
+ *         ],
+ *         bindings: [
+ *           {
+ *             kind: ['text'|'attribute'],
+ *             mode: ['{'|'['],
+ *             name: '<name>'
+ *             value: '<annotation>'
+ *           }, ...
+ *         ],
+ *         // TODO(sjmiles): this is annotation-parent, not node-parent
+ *         parent: <reference to parent annotation object>,
+ *         index: <integer index in parent's childNodes collection>
+ *       },
+ *       ...
+ *     ]
+ * 
+ * @class Template feature
+ */
+
+  // null-array (shared empty array to avoid null-checks)
+  Polymer.nar = [];
+
+  Polymer.Annotations = {
+
+    // preprocess-time
+
+    // construct and return a list of annotation records
+    // by scanning `template`'s content
+    //
+    parseAnnotations: function(template) {
+      var list = [];
+      var content = template._content || template.content; 
+      this._parseNodeAnnotations(content, list);
+      return list;
+    },
+
+    // add annotations gleaned from subtree at `node` to `list`
+    _parseNodeAnnotations: function(node, list) {
+      return node.nodeType === Node.TEXT_NODE ?
+        this._parseTextNodeAnnotation(node, list) :
+          // TODO(sjmiles): are there other nodes we may encounter
+          // that are not TEXT_NODE but also not ELEMENT?
+          this._parseElementAnnotations(node, list);
+    },
+
+    // add annotations gleaned from TextNode `node` to `list`
+    _parseTextNodeAnnotation: function(node, list) {
+      var v = node.textContent, escape = v.slice(0, 2);
+      if (escape === '{{' || escape === '[[') {
+        // NOTE: use a space here so the textNode remains; some browsers
+        // (IE) evacipate an empty textNode.
+        node.textContent = ' ';
+        var annote = {
+          bindings: [{
+            kind: 'text',
+            mode: escape[0],
+            value: v.slice(2, -2)
+          }]
+        };
+        list.push(annote);
+        return annote;
+      }
+    },
+
+    // add annotations gleaned from Element `node` to `list`
+    _parseElementAnnotations: function(element, list) {
+      var annote = {
+        bindings: [],
+        events: []
+      };
+      this._parseChildNodesAnnotations(element, annote, list);
+      // TODO(sjmiles): is this for non-ELEMENT nodes? If so, we should
+      // change the contract of this method, or filter these out above.
+      if (element.attributes) {
+        this._parseNodeAttributeAnnotations(element, annote, list);
+        // TODO(sorvell): ad hoc callback for doing work on elements while
+        // leveraging annotator's tree walk.
+        // Consider adding an node callback registry and moving specific 
+        // processing out of this module.
+        if (this.prepElement) {
+          this.prepElement(element);
+        }
+      }
+      if (annote.bindings.length || annote.events.length || annote.id) {
+        list.push(annote);
+      }
+      return annote;
+    },
+
+    // add annotations gleaned from children of `root` to `list`, `root`'s
+    // `annote` is supplied as it is the annote.parent of added annotations 
+    _parseChildNodesAnnotations: function(root, annote, list, callback) {
+      if (root.firstChild) {
+        for (var i=0, node=root.firstChild; node; node=node.nextSibling, i++){
+          if (node.localName === 'template') {
+            // TODO(sjmiles): simply altering the .content reference didn't
+            // work (there was some confusion, might need verification)
+            var content = document.createDocumentFragment();
+            content.appendChild(node.content);
+            // TODO(sjmiles): using `nar` to avoid unnecessary allocation;
+            // in general the handling of these arrays needs some cleanup 
+            // in this module
+            list.push({
+              bindings: Polymer.nar,
+              events: Polymer.nar,
+              templateContent: content,
+              parent: annote,
+              index: i
+            });
+          }
+          //
+          var childAnnotation = this._parseNodeAnnotations(node, list, callback);
+          if (childAnnotation) {
+            childAnnotation.parent = annote;
+            childAnnotation.index = i;
+          }
+        }
+      }
+    },
+
+    // add annotation data from attributes to the `annotation` for node `node`
+    // TODO(sjmiles): the distinction between an `annotation` and 
+    // `annotation data` is not as clear as it could be
+    // Walk attributes backwards, since removeAttribute can be vetoed by
+    // IE in certain cases (e.g. <input value="foo">), resulting in the
+    // attribute staying in the attributes list
+    _parseNodeAttributeAnnotations: function(node, annotation) {
+      for (var i=node.attributes.length-1, a; (a=node.attributes[i]); i--) {
+        var n = a.name, v = a.value;
+        // id
+        if (n === 'id') {
+          annotation.id = v;
+        }
+        // events (on-*)
+        else if (n.slice(0, 3) === 'on-') {
+          node.removeAttribute(n);
+          annotation.events.push({
+            name: n.slice(3),
+            value: v
+          });
+        }
+        // bindings (other attributes)
+        else {
+          var b = this._parseNodeAttributeAnnotation(node, n, v);
+          if (b) {
+            annotation.bindings.push(b);
+          }
+        }
+      }
+    },
+
+    // construct annotation data from a generic attribute, or undefined
+    _parseNodeAttributeAnnotation: function(node, n, v) {
+      var mode = '', escape = v.slice(0, 2), name = n;
+      if (escape === '{{' || escape === '[[') {
+        // Mode (one-way or two)
+        mode = escape[0];
+        v = v.slice(2, -2);
+        // Negate
+        var not = false;
+        if (v[0] == '!') {
+          v = v.substring(1);
+          not = true;
+        }
+        // Attribute or property
+        var kind = 'property';
+        if (n[n.length-1] == '$') {
+          name = n.slice(0, -1);
+          kind = 'attribute';
+        }
+        // Custom notification event
+        var notifyEvent, colon;
+        if (mode == '{' && (colon = v.indexOf('::')) > 0) {
+          notifyEvent = v.substring(colon + 2);
+          v = v.substring(0, colon);
+        }
+        // Remove annotation
+        node.removeAttribute(n);
+        // Case hackery: attributes are lower-case, but bind targets 
+        // (properties) are case sensitive. Gambit is to map dash-case to 
+        // camel-case: `foo-bar` becomes `fooBar`.
+        // Attribute bindings are excepted.
+        if (kind === 'property') {
+          name = Polymer.CaseMap.dashToCamelCase(name);
+        }
+        return {
+          kind: kind,
+          mode: mode,
+          name: name,
+          value: v,
+          negate: not,
+          event: notifyEvent
+        };
+      }
+    },
+
+    // instance-time
+
+    _localSubTree: function(node, host) {
+      return (node === host) ? node.childNodes :
+         (node.lightChildren || node.childNodes);
+    },
+
+    findAnnotatedNode: function(root, annote) {
+      // recursively ascend tree until we hit root
+      var parent = annote.parent && 
+        Polymer.Annotations.findAnnotatedNode(root, annote.parent);
+      // unwind the stack, returning the indexed node at each level
+      return !parent ? root : 
+        Polymer.Annotations._localSubTree(parent, root)[annote.index];
+    }
+
+  };
+
+
+</script>
+<script>
+
+  (function() {
+
+    // path fixup for urls in cssText that's expected to 
+    // come from a given ownerDocument
+    function resolveCss(cssText, ownerDocument) {
+      return cssText.replace(CSS_URL_RX, function(m, pre, url, post) {
+        return pre + '\'' + 
+          resolve(url.replace(/["']/g, ''), ownerDocument) + 
+          '\'' + post;
+      });
+    }
+
+    // url fixup for urls in an element's attributes made relative to 
+    // ownerDoc's base url
+    function resolveAttrs(element, ownerDocument) {
+      for (var name in URL_ATTRS) {
+        var a$ = URL_ATTRS[name];
+        for (var i=0, l=a$.length, a, at, v; (i<l) && (a=a$[i]); i++) {
+          if (name === '*' || element.localName === name) {
+            at = element.attributes[a];
+            v = at && at.value;
+            if (v && (v.search(BINDING_RX) < 0)) {
+              at.value = (a === 'style') ?
+                resolveCss(v, ownerDocument) :
+                resolve(v, ownerDocument);
+            }
+          }
+        }
+      }
+    }
+
+    function resolve(url, ownerDocument) {
+      var resolver = getUrlResolver(ownerDocument);
+      resolver.href = url;
+      return resolver.href || url;
+    }
+
+    var tempDoc;
+    var tempDocBase;
+    function resolveUrl(url, baseUri) {
+      if (!tempDoc) {
+        tempDoc = document.implementation.createHTMLDocument('temp');
+        tempDocBase = tempDoc.createElement('base');
+        tempDoc.head.appendChild(tempDocBase);
+      }
+      tempDocBase.href = baseUri;
+      return resolve(url, tempDoc);
+    }
+
+    function getUrlResolver(ownerDocument) {
+      return ownerDocument.__urlResolver || 
+        (ownerDocument.__urlResolver = ownerDocument.createElement('a'));
+    }
+
+    var CSS_URL_RX = /(url\()([^)]*)(\))/g;
+    var URL_ATTRS = {
+      '*': ['href', 'src', 'style', 'url'],
+      form: ['action']
+    };
+    var BINDING_RX = /\{\{|\[\[/;
+
+    // exports
+    Polymer.ResolveUrl = {
+      resolveCss: resolveCss,
+      resolveAttrs: resolveAttrs,
+      resolveUrl: resolveUrl
+    };
+
+  })();
+
+</script><script>
+
+/**
+ * Scans a template to produce an annotation object that stores expression 
+ * metadata along with information to associate the metadata with nodes in an 
+ * instance.
+ *
+ * Elements with `id` in the template are noted and marshaled into an 
+ * the `$` hash in an instance. 
+ * 
+ * Example
+ * 
+ *     &lt;template>
+ *       &lt;div id="foo">&lt;/div>
+ *     &lt;/template>
+ *     &lt;script>
+ *      Polymer({
+ *        task: function() {
+ *          this.$.foo.style.color = 'red';
+ *        }
+ *      });
+ *     &lt;/script>
+ * 
+ * Other expressions that are noted include:
+ *
+ * Double-mustache annotations in text content. The annotation must be the only
+ * content in the tag, compound expressions are not (currently) supported.
+ *
+ *     <[tag]>{{path.to.host.property}}<[tag]>
+ *
+ * Double-mustache annotations in an attribute.
+ *
+ *     <[tag] someAttribute="{{path.to.host.property}}"><[tag]>
+ *
+ * Only immediate host properties can automatically trigger side-effects.
+ * Setting `host.path` in the example above triggers the binding, setting
+ * `host.path.to.host.property` does not.
+ *
+ * `on-` style event declarations.
+ *
+ *     <[tag] on-<event-name>="{{hostMethodName}}"><[tag]>
+ *
+ * Note: **the `annotations` feature does not actually implement the behaviors
+ * associated with these expressions, it only captures the data**. 
+ * 
+ * Other optional features contain actual data implementations.
+ *
+ * @class standard feature: annotations
+ */
+
+/*
+
+Scans a template to produce an annotation map that stores expression metadata
+and information that associates the metadata to nodes in a template instance.
+
+Supported annotations are:
+
+  * id attributes
+  * binding annotations in text nodes
+    * double-mustache expressions: {{expression}}
+    * double-bracket expressions: [[expression]]
+  * binding annotations in attributes
+    * attribute-bind expressions: name="{{expression}} || [[expression]]"
+    * property-bind expressions: name*="{{expression}} || [[expression]]"
+    * property-bind expressions: name:="expression"
+  * event annotations
+    * event delegation directives: on-<eventName>="expression"
+
+Generated data-structure:
+
+  [
+    {
+      id: '<id>',
+      events: [
+        {
+          mode: ['auto'|''],
+          name: '<name>'
+          value: '<expression>'
+        }, ...
+      ],
+      bindings: [
+        {
+          kind: ['text'|'attribute'|'property'],
+          mode: ['auto'|''],
+          name: '<name>'
+          value: '<expression>'
+        }, ...
+      ],
+      // TODO(sjmiles): confusingly, this is annotation-parent, not node-parent
+      parent: <reference to parent annotation>,
+      index: <integer index in parent's childNodes collection>
+    },
+    ...
+  ]
+
+TODO(sjmiles): this module should produce either syntactic metadata
+(e.g. double-mustache, double-bracket, star-attr), or semantic metadata
+(e.g. manual-bind, auto-bind, property-bind). Right now it's half and half.
+
+*/
+
+  Polymer.Base.addFeature({
+
+    // registration-time
+
+    _prepAnnotations: function() {
+      if (!this._template) {
+        this._annotes = [];
+      } else {
+        // TODO(sorvell): ad hoc method of plugging behavior into Annotations
+        Polymer.Annotations.prepElement = this._prepElement.bind(this);
+        this._annotes = Polymer.Annotations.parseAnnotations(this._template);
+        Polymer.Annotations.prepElement = null;
+      }
+    },
+
+    _prepElement: function(element) {
+      Polymer.ResolveUrl.resolveAttrs(element, this._template.ownerDocument);
+    },
+
+    // instance-time
+
+    findAnnotatedNode: Polymer.Annotations.findAnnotatedNode,
+
+    // marshal all teh things
+    _marshalAnnotationReferences: function() {
+      if (this._template) {
+        this._marshalIdNodes();
+        this._marshalAnnotatedNodes();
+        this._marshalAnnotatedListeners();
+      }
+    },
+
+    // push configuration references at configure time
+    _configureAnnotationReferences: function() {
+      this._configureTemplateContent();
+    },
+
+    // nested template contents have been stored prototypically to avoid 
+    // unnecessary duplication, here we put references to the 
+    // indirected contents onto the nested template instances
+    _configureTemplateContent: function() {
+      this._annotes.forEach(function(note) {
+        if (note.templateContent) {
+          var template = this.findAnnotatedNode(this.root, note);
+          template._content = note.templateContent;
+        }
+      }, this);
+    },
+
+    // construct `$` map (from id annotations)
+    _marshalIdNodes: function() {
+      this.$ = {};
+      this._annotes.forEach(function(a) {
+        if (a.id) {
+          this.$[a.id] = this.findAnnotatedNode(this.root, a);
+        }
+      }, this);
+    },
+
+    // concretize `_nodes` map (from anonymous annotations)
+    _marshalAnnotatedNodes: function() {
+      if (this._nodes) {
+        this._nodes = this._nodes.map(function(a) {
+          return this.findAnnotatedNode(this.root, a);
+        }, this);
+      }
+    },
+
+    // install event listeners (from event annotations)
+    _marshalAnnotatedListeners: function() {
+      this._annotes.forEach(function(a) {
+        if (a.events && a.events.length) {
+          var node = this.findAnnotatedNode(this.root, a);
+          a.events.forEach(function(e) {
+            this.listen(node, e.name, e.value);
+          }, this);
+        }
+      }, this);
+    }
+
+  });
+
+</script>
+<script>
+
+(function(scope) {
+
+ 'use strict';
+
+  var async = scope.Base.async;
+
+  var Gestures = {
+    gestures: {},
+
+    // automate the event listeners for the native events
+    // TODO(dfreedm): add a way to remove handlers.
+    add: function(evType, node, handler) {
+      // listen for events in order to "recognize" this event
+      var g = this.gestures[evType];
+      var gn = '_' + evType;
+      var info = {started: false, abortTrack: false, oneshot: false};
+      if (g && !node[gn]) {
+        if (g.touchaction) {
+          this._setupTouchAction(node, g.touchaction, info);
+        }
+        for (var i = 0, n, sn, fn; i < g.deps.length; i++) {
+          n = g.deps[i];
+          fn = g[n].bind(g, info);
+          sn = '_' + evType + '-' + n;
+          // store the handler on the node for future removal
+          node[sn] = fn;
+          node.addEventListener(n, fn);
+        }
+        node[gn] = 0;
+      }
+      // listen for the gesture event
+      node[gn]++;
+      node.addEventListener(evType, handler);
+    },
+
+    remove: function(evType, node, handler) {
+      var g = this.gestures[evType];
+      var gn = '_' + evType;
+      if (g && node[gn]) {
+        for (var i = 0, n, sn, fn; i < g.deps.length; i++) {
+          n = g.deps[i];
+          sn = '_' + evType + '-' + n;
+          fn = node[sn];
+          if (fn){
+            node.removeEventListener(n, fn);
+            // remove stored handler to allow GC
+            node[sn] = undefined;
+          }
+        }
+        node[gn] = node[gn] ? (node[gn] - 1) : 0;
+        node.removeEventListener(evType, handler);
+      }
+    },
+
+    register: function(recog) {
+      this.gestures[recog.name] = recog;
+    },
+
+    // touch will make synthetic mouse events
+    // preventDefault on touchend will cancel them,
+    // but this breaks <input> focus and link clicks
+    // Disabling "mouse" handlers for 500ms is enough
+
+    _cancelFunction: null,
+
+    cancelNextClick: function(timeout) {
+      if (!this._cancelFunction) {
+        timeout = timeout || 500;
+        var self = this;
+        var reset = function() {
+          var cfn = self._cancelFunction;
+          if (cfn) {
+            clearTimeout(cfn.id);
+            document.removeEventListener('click', cfn, true);
+            self._cancelFunction = null;
+          }
+        };
+        var canceller = function(e) {
+          e.tapPrevented = true;
+          reset();
+        };
+        canceller.id = setTimeout(reset, timeout);
+        this._cancelFunction = canceller;
+        document.addEventListener('click', canceller, true);
+      }
+    },
+
+    // try to use the native touch-action, if it exists
+    _hasNativeTA: typeof document.head.style.touchAction === 'string',
+
+    // set scrolling direction on node to check later on first move
+    // must call this before adding event listeners!
+    setTouchAction: function(node, value) {
+      if (this._hasNativeTA) {
+        node.style.touchAction = value;
+      }
+      node.touchAction = value;
+    },
+
+    _setupTouchAction: function(node, value, info) {
+      // reuse custom value on node if set
+      var ta = node.touchAction;
+      value = ta || value;
+      // set an anchor point to see how far first move is
+      node.addEventListener('touchstart', function(e) {
+        var t = e.changedTouches[0];
+        info.initialTouch = {x: t.clientX, y: t.clientY};
+        info.abortTrack = false;
+        info.oneshot = false;
+      });
+      node.addEventListener('touchmove', function(e) {
+        // only run this once
+        if (info.oneshot) {
+          return;
+        }
+        info.oneshot = true;
+        // "none" means always track
+        if (value === 'none') {
+          return;
+        }
+        // "auto" is default, always scroll
+        // bail-out if touch-action did its job
+        // the touchevent is non-cancelable if the page/area is scrolling
+        if (value === 'auto' || !value || (ta && !e.cancelable)) {
+          info.abortTrack = true;
+          return;
+        }
+        // check first move direction
+        // unfortunately, we can only make the decision in the first move,
+        // so we have to use whatever values are available.
+        // Typically, this can be a really small amount, :(
+        var t = e.changedTouches[0];
+        var x = t.clientX, y = t.clientY;
+        var dx = Math.abs(info.initialTouch.x - x);
+        var dy = Math.abs(info.initialTouch.y - y);
+        // scroll in x axis, abort track if we move more in x direction
+        if (value === 'pan-x') {
+          info.abortTrack = dx >= dy;
+          // scroll in y axis, abort track if we move more in y direction
+        } else if (value === 'pan-y') {
+          info.abortTrack = dy >= dx;
+        }
+      });
+    },
+
+    fire: function(target, type, detail, bubbles, cancelable) {
+      return target.dispatchEvent(
+        new CustomEvent(type, {
+          detail: detail,
+          bubbles: bubbles,
+          cancelable: cancelable
+        })
+      );
+    }
+
+  };
+
+  Gestures.register({
+    name: 'track',
+    touchaction: 'none',
+    deps: ['mousedown', 'touchmove', 'touchend'],
+
+    mousedown: function(info, e) {
+      var t = e.currentTarget;
+      var self = this;
+      var movefn = function movefn(e, up) {
+        if (!info.tracking && !up) {
+          // set up tap prevention
+          Gestures.cancelNextClick();
+        }
+        // first move is 'start', subsequent moves are 'move', mouseup is 'end'
+        var state = up ? 'end' : (!info.started ? 'start' : 'move');
+        info.started = true;
+        self.fire(t, e, state);
+        e.preventDefault();
+      };
+      var upfn = function upfn(e) {
+        // call mousemove function with 'end' state
+        movefn(e, true);
+        info.started = false;
+        // remove the temporary listeners
+        document.removeEventListener('mousemove', movefn);
+        document.removeEventListener('mouseup', upfn);
+      };
+      // add temporary document listeners as mouse retargets
+      document.addEventListener('mousemove', movefn);
+      document.addEventListener('mouseup', upfn);
+    },
+
+    touchmove: function(info, e) {
+      var t = e.currentTarget;
+      var ct = e.changedTouches[0];
+      // if track was aborted, stop tracking
+      if (info.abortTrack) {
+        return;
+      }
+      e.preventDefault();
+      // the first track event is sent after some hysteresis with touchmove.
+      // Use `started` state variable to differentiate the "first" move from
+      // the rest to make track.state == 'start'
+      // first move is 'start', subsequent moves are 'move'
+      var state = !info.started ? 'start' : 'move';
+      info.started = true;
+      this.fire(t, ct, state);
+    },
+
+    touchend: function(info, e) {
+      var t = e.currentTarget;
+      var ct = e.changedTouches[0];
+      // only trackend if track was started and not aborted
+      if (info.started && !info.abortTrack) {
+        // reset started state on up
+        info.started = false;
+        var ne = this.fire(t, ct, 'end');
+        // iff tracking, always prevent tap
+        e.tapPrevented = true;
+      }
+    },
+
+    fire: function(target, touch, state) {
+      return Gestures.fire(target, 'track', {
+        state: state,
+        x: touch.clientX,
+        y: touch.clientY
+      });
+    }
+
+  });
+
+  // dispatch a *bubbling* "tap" only at the node that is the target of the
+  // generating event.
+  // dispatch *synchronously* so that we can implement prevention of native
+  // actions like links being followed.
+  //
+  // TODO(dfreedm): a tap should not occur when there's too much movement.
+  // Right now, a tap can occur when a touchend happens very far from the
+  // generating touch.
+  // This *should* obviate the need for tapPrevented via track.
+  Gestures.register({
+    name: 'tap',
+    deps: ['click', 'touchend'],
+
+    click: function(info, e) {
+      this.forward(e);
+    },
+
+    touchend: function(info, e) {
+      Gestures.cancelNextClick();
+      this.forward(e);
+    },
+
+    forward: function(e) {
+      // prevent taps from being generated from events that have been
+      // canceled (e.g. via cancelNextClick) or already handled via
+      // a listener lower in the tree.
+      if (!e.tapPrevented) {
+        e.tapPrevented = true;
+        this.fire(e.target);
+      }
+    },
+
+    // fire a bubbling event from the generating target.
+    fire: function(target) {
+      Gestures.fire(target, 'tap', {}, true);
+    }
+
+  });
+
+  scope.Gestures = Gestures;
+
+})(Polymer);
+
+</script>
+<script>
+
+  /**
+   * Supports `listeners` and `keyPresses` objects.
+   *
+   * Example:
+   *
+   *     using('Base', function(Base) {
+   *
+   *       Polymer({
+   *
+   *         listeners: {
+   *           // `click` events on the host are delegated to `clickHandler`
+   *           'click': 'clickHandler'
+   *         },
+   *
+   *         keyPresses: {
+   *           // 'ESC' key presses are delegated to `escHandler`
+   *           Base.ESC_KEY: 'escHandler'
+   *         },
+   *
+   *         ...
+   *
+   *       });
+   *
+   *     });
+   *
+   * @class standard feature: events
+   *
+   */
+
+  Polymer.Base.addFeature({
+
+    listeners: {},
+
+    _marshalListeners: function() {
+      this._listenListeners(this.listeners);
+      this._listenKeyPresses(this.keyPresses);
+    },
+
+    _listenListeners: function(listeners) {
+      var node, name, key;
+      for (key in listeners) {
+        if (key.indexOf('.') < 0) {
+          node = this;
+          name = key;
+        } else {
+          name = key.split('.');
+          node = this.$[name[0]];
+          name = name[1];
+        }
+        this.listen(node, name, listeners[key]);
+      }
+    },
+
+    listen: function(node, eventName, methodName) {
+      var host = this;
+      var handler = function(e) {
+        if (host[methodName]) {
+          host[methodName](e, e.detail);
+        } else {
+          console.warn('[%s].[%s]: event handler [%s] is null in scope (%o)',
+            node.localName, eventName, methodName, host);
+        }
+      };
+      switch (eventName) {
+        case 'tap':
+        case 'track':
+          Polymer.Gestures.add(eventName, node, handler);
+          break;
+
+        default:
+          node.addEventListener(eventName, handler);
+          break;
+      }
+    },
+
+    keyPresses: {},
+
+    _listenKeyPresses: function(keyPresses) {
+      // for..in here to gate empty keyPresses object (iterates once or never)
+      for (var n in keyPresses) {
+        // only get here if there is something in keyPresses
+        // TODO(sjmiles): _keyPressesFeatureHandler uses `this.keyPresses`
+        // to look up keycodes, it's not agnostic like this method is
+        this.addEventListener('keydown', this._keyPressesFeatureHandler);
+        // map string keys to numeric codes
+        for (n in keyPresses) {
+          if (typeof n === 'string') {
+            keyPresses[this.eventKeyCodes[n]] = keyPresses[n];
+          }
+        }
+        break;
+      }
+    },
+
+    _keyPressesFeatureHandler: function(e) {
+      var method = this.keyPresses[e.keyCode];
+      if (method && this[method]) {
+        return this[method](e.keyCode, e);
+      }
+    },
+
+    eventKeyCodes: {
+      ESC_KEY: 27,
+      ENTER_KEY: 13,
+      LEFT: 37,
+      UP: 38,
+      RIGHT: 39,
+      DOWN: 40
+    }
+
+  });
+
+</script>
+<script>
+
+Polymer.Async = (function() {
+  
+  var currVal = 0;
+  var lastVal = 0;
+  var callbacks = [];
+  var twiddle = document.createTextNode('');
+
+  function runAsync(callback, waitTime) {
+    if (waitTime > 0) {
+      return ~setTimeout(callback, waitTime);
+    } else {
+      twiddle.textContent = currVal++;
+      callbacks.push(callback);
+      return currVal - 1;
+    }
+  }
+
+  function cancelAsync(handle) {
+    if (handle < 0) {
+      clearTimeout(~handle);
+    } else {
+      var idx = handle - lastVal;
+      if (idx >= 0) {
+        if (!callbacks[idx]) {
+          throw 'invalid async handle: ' + handle;
+        }
+        callbacks[idx] = null;
+      }
+    }
+  }
+
+  function atEndOfMicrotask() {
+    var len = callbacks.length;
+    for (var i=0; i<len; i++) {
+      var cb = callbacks[i];
+      if (cb) {
+        cb();
+      }
+    }
+    callbacks.splice(0, len);
+    lastVal += len;
+  }
+
+  new (window.MutationObserver || JsMutationObserver)(atEndOfMicrotask)
+    .observe(twiddle, {characterData: true})
+    ;
+  
+  // exports 
+
+  return {
+    run: runAsync,
+    cancel: cancelAsync
+  };
+  
+})();
+
+</script>
+<script>
+
+Polymer.Debounce = (function() {
+  
+  // usage
+  
+  // invoke cb.call(this) in 100ms, unless the job is re-registered,
+  // which resets the timer
+  // 
+  // this.job = this.debounce(this.job, cb, 100)
+  //
+  // returns a handle which can be used to re-register a job
+
+  var Async = Polymer.Async;
+  
+  var Debouncer = function(context) {
+    this.context = context;
+    this.boundComplete = this.complete.bind(this);
+  };
+  
+  Debouncer.prototype = {
+    go: function(callback, wait) {
+      var h;
+      this.finish = function() {
+        Async.cancel(h);
+      };
+      h = Async.run(this.boundComplete, wait);
+      this.callback = callback;
+    },
+    stop: function() {
+      if (this.finish) {
+        this.finish();
+        this.finish = null;
+      }
+    },
+    complete: function() {
+      if (this.finish) {
+        this.stop();
+        this.callback.call(this.context);
+      }
+    }
+  };
+
+  function debounce(debouncer, callback, wait) {
+    if (debouncer) {
+      debouncer.stop();
+    } else {
+      debouncer = new Debouncer(this);
+    }
+    debouncer.go(callback, wait);
+    return debouncer;
+  }
+  
+  // exports 
+
+  return debounce;
+  
+})();
+
+</script>
+<script>
+
+  Polymer.Base.addFeature({
+
+    $$: function(slctr) {
+      return Polymer.dom(this.root).querySelector(slctr);
+    },
+
+    toggleClass: function(name, bool, node) {
+      node = node || this;
+      if (arguments.length == 1) {
+        bool = !node.classList.contains(name);
+      }
+      if (bool) {
+        node.classList.add(name);
+      } else {
+        node.classList.remove(name);
+      }
+    },
+
+    toggleAttribute: function(name, bool, node) {
+      (node || this)[bool ? 'setAttribute' : 'removeAttribute'](name, '');
+    },
+
+    classFollows: function(className, neo, old) {
+      if (old) {
+        old.classList.remove(className);
+      }
+      if (neo) {
+        neo.classList.add(className);
+      }
+    },
+
+    attributeFollows: function(name, neo, old) {
+      if (old) {
+        old.removeAttribute(name);
+      }
+      if (neo) {
+        neo.setAttribute(name, '');
+      }
+    },
+
+    getContentChildNodes: function(slctr) {
+      return Polymer.dom(Polymer.dom(this.root).querySelector(
+          slctr || 'content')).getDistributedNodes();
+    },
+
+    getContentChildren: function(slctr) {
+      return this.getContentChildNodes(slctr).filter(function(n) {
+        return (n.nodeType === Node.ELEMENT_NODE);
+      });
+    },
+
+    // TODO(sjmiles): use a dictionary for options after `detail`
+    fire: function(type, detail, onNode, bubbles, cancelable) {
+      var node = onNode || this;
+      var detail = (detail === null || detail === undefined) ? {} : detail;
+      var event = new CustomEvent(type, {
+        bubbles: bubbles !== undefined ? bubbles : true,
+        cancelable: cancelable !== undefined ? cancelable : true,
+        detail: detail
+      });
+      node.dispatchEvent(event);
+      return event;
+    },
+
+    async: function(method, waitTime) {
+      return Polymer.Async.run(method.bind(this), waitTime);
+    },
+
+    cancelAsync: function(handle) {
+      Polymer.Async.cancel(handle);
+    },
+
+    arrayDelete: function(array, item) {
+      var index = array.indexOf(item);
+      if (index >= 0) {
+        return array.splice(index, 1);
+      }
+    },
+
+    transform: function(node, transform) {
+      node.style.webkitTransform = transform;
+      node.style.transform = transform;
+    },
+
+    translate3d: function(node, x, y, z) {
+      this.transform(node, 'translate3d(' + x + ',' + y + ',' + z + ')');
+    },
+
+    importHref: function(href, onload, onerror) {
+      var l = document.createElement('link');
+      l.rel = 'import';
+      l.href = href;
+      if (onload) {
+        l.onload = onload.bind(this);
+      }
+      if (onerror) {
+        l.onerror = onerror.bind(this);
+      }
+      document.head.appendChild(l);
+      return l;
+    },
+
+    /**
+     * Debounce signals.
+     *
+     * Call `debounce` to collapse multiple requests for a named task into
+     * one invocation which is made after the wait time has elapsed with
+     * no new request.
+     *
+     *     debouncedClickAction: function(e) {
+     *       // will not call `processClick` more than once per 100ms
+     *       this.debounce('click', function() {
+     *        this.processClick;
+     *       }, 100);
+     *     }
+     *
+     * @method debounce
+     * @param String {String} jobName A string to indentify the debounce job.
+     * @param Function {Function} callback A function that is called (with `this` context) when the wait time elapses.
+     * @param Number {Number} wait Time in milliseconds (ms) after the last signal that must elapse before invoking `callback`
+     * @type Handle
+     */
+    debounce: function(jobName, callback, wait) {
+      this._debounce('_job_' + jobName, callback, wait);
+    },
+
+    _debounce: function(job, callback, wait) {
+      this[job] = Polymer.Debounce.call(this, this[job], callback, wait);
+    },
+
+    create: function(tag, props) {
+      var elt = document.createElement(tag);
+      if (props) {
+        for (var n in props) {
+          elt[n] = props[n];
+        }
+      }
+      return elt;
+    }
+
+  });
+
+</script>
+<script>
+
+  Polymer.Bind = {
+
+    // for prototypes (usually)
+
+    prepareModel: function(model) {
+      model._propertyEffects = {};
+      model._bindListeners = [];
+      // TODO(sjmiles): no mixin function?
+      var api = this._modelApi;
+      for (var n in api) {
+        model[n] = api[n];
+      }
+    },
+
+    _modelApi: {
+
+      _notifyChange: function(property) {
+        var eventName = Polymer.CaseMap.camelToDashCase(property) + '-changed';
+        // TODO(sjmiles): oops, `fire` doesn't exist at this layer
+        this.fire(eventName, {
+          value: this[property]
+        }, null, false);
+      },
+
+      // TODO(sjmiles): removing _notifyListener from here breaks accessors.html
+      // as a standalone lib. This is temporary, as standard/configure.html
+      // installs it's own version on Polymer.Base, and we need that to work
+      // right now.
+      // NOTE: exists as a hook for processing listeners
+      /*
+      _notifyListener: function(fn, e) {
+        // NOTE: pass e.target because e.target can get lost if this function
+        // is queued asynchrously
+        return fn.call(this, e, e.target);
+      },
+      */
+
+      _propertySet: function(property, value, effects) {
+        var old = this._data[property];
+        if (old !== value) {
+          this._data[property] = value;
+          if (typeof value == 'object') {
+            this._clearPath(property);
+          }
+          if (effects) {
+            this._effectEffects(property, value, effects, old);
+          }
+        }
+        return old;
+      },
+
+      _effectEffects: function(property, value, effects, old) {
+        effects.forEach(function(fx) {
+          //console.log(fx);
+          var fn = Polymer.Bind[fx.kind + 'Effect'];
+          if (fn) {
+            fn.call(this, property, value, fx.effect, old);
+          }
+        }, this);
+      },
+
+      _clearPath: function(path) {
+        for (var prop in this._data) {
+          if (prop.indexOf(path + '.') === 0) {
+            this._data[prop] = undefined;
+          }
+        }
+      }
+
+    },
+
+    // a prepared model can acquire effects
+
+    addPropertyEffect: function(model, property, kind, effect) {
+      var fx = model._propertyEffects[property];
+      if (!fx) {
+        fx = model._propertyEffects[property] = [];
+      }
+      fx.push({
+        kind: kind,
+        effect: effect
+      });
+    },
+
+    createBindings: function(model) {
+      //console.group(model.is);
+      // map of properties to effects
+      var fx$ = model._propertyEffects;
+      if (fx$) {
+        // for each property with effects
+        for (var n in fx$) {
+          // array of effects
+          var fx = fx$[n];
+          // effects have priority
+          fx.sort(this._sortPropertyEffects);
+          // create accessors
+          this._createAccessors(model, n, fx);
+        }
+      }
+      //console.groupEnd();
+    },
+
+    _sortPropertyEffects: (function() {
+      // TODO(sjmiles): EFFECT_ORDER buried this way is not ideal,
+      // but presumably the sort method is going to be a hot path and not
+      // have a `this`. There is also a problematic dependency on effect.kind
+      // values here, which are otherwise pluggable.
+      var EFFECT_ORDER = {
+        'compute': 0,
+        'annotation': 1,
+        'computedAnnotation': 2,
+        'reflect': 3,
+        'notify': 4,
+        'observer': 5,
+        'function': 6
+      };
+      return function(a, b) {
+        return EFFECT_ORDER[a.kind] - EFFECT_ORDER[b.kind];
+      };
+    })(),
+
+    // create accessors that implement effects
+
+    _createAccessors: function(model, property, effects) {
+      var defun = {
+        get: function() {
+          // TODO(sjmiles): elide delegation for performance, good ROI?
+          return this._data[property];
+        }
+      };
+      var setter = function(value) {
+        this._propertySet(property, value, effects);
+      };
+      // ReadOnly properties have a private setter only
+      // TODO(kschaaf): Per current Bind factoring, we shouldn't
+      // be interrogating the prototype here
+      if (model.isReadOnlyProperty && model.isReadOnlyProperty(property)) {
+        //model['_' + property + 'Setter'] = setter;
+        //model['_set_' + property] = setter;
+        model['_set' + this.upper(property)] = setter;
+      } else {
+        defun.set = setter;
+      }
+      Object.defineProperty(model, property, defun);
+    },
+
+    upper: function(name) {
+      return name[0].toUpperCase() + name.substring(1);
+    },
+
+    _addAnnotatedListener: function(model, index, property, path, event) {
+      var fn = this._notedListenerFactory(property, path,
+        this._isStructured(path), this._isEventBogus);
+      var eventName = event ||
+        (Polymer.CaseMap.camelToDashCase(property) + '-changed');
+      model._bindListeners.push({
+        index: index,
+        property: property,
+        path: path,
+        changedFn: fn,
+        event: eventName
+      });
+    },
+
+    _isStructured: function(path) {
+      return path.indexOf('.') > 0;
+    },
+
+    _isEventBogus: function(e, target) {
+      return e.path && e.path[0] !== target;
+    },
+
+    _notedListenerFactory: function(property, path, isStructured, bogusTest) {
+      return function(e, target) {
+        if (!bogusTest(e, target)) {
+          if (e.detail && e.detail.path) {
+            this.notifyPath(this._fixPath(path, property, e.detail.path),
+              e.detail.value);
+          } else {
+            var value = target[property];
+            if (!isStructured) {
+              this[path] = target[property];
+            } else {
+              // TODO(kschaaf): dirty check avoids null references when the object has gone away
+              if (this._data[path] != value) {
+                this.setPathValue(path, value);
+              }
+            }
+          }
+        }
+      };
+    },
+
+    // for instances
+
+    prepareInstance: function(inst) {
+      inst._data = Object.create(null);
+    },
+
+    setupBindListeners: function(inst) {
+      inst._bindListeners.forEach(function(info) {
+        // Property listeners:
+        // <node>.on.<property>-changed: <path]> = e.detail.value
+        //console.log('[_setupBindListener]: [%s][%s] listening for [%s][%s-changed]', this.localName, info.path, info.id || info.index, info.property);
+        var node = inst._nodes[info.index];
+        node.addEventListener(info.event, inst._notifyListener.bind(inst, info.changedFn));
+      });
+    }
+
+  };
+
+</script>
+<script>
+
+  Polymer.Base.extend(Polymer.Bind, {
+
+    _shouldAddListener: function(info) {
+      return info.name &&
+             info.mode === '{' &&
+             !info.negate &&
+             info.kind != 'attribute'
+             ;
+    },
+
+    annotationEffect: function(source, value, info) {
+      if (source != info.value) {
+        value = this.getPathValue(info.value);
+      }
+      var calc = info.negate ? !value : value;
+      return this._applyEffectValue(calc, info);
+    },
+
+    reflectEffect: function(source) {
+      this.reflectPropertyToAttribute(source);
+    },
+
+    notifyEffect: function(source) {
+      this._notifyChange(source);
+    },
+
+    observerEffect: function(source, value, info, old) {
+      //console.log(value, info);
+      if (info.property) {
+        this[info.method](value, old);
+      } else {
+        var args = Polymer.Bind._marshalArgs(this._data, info.properties);
+        if (args) {
+          this[info.method].apply(this, args);
+        }
+      }
+    },
+
+    computeEffect: function(source, value, info) {
+      var args = Polymer.Bind._marshalArgs(this._data, info.args);
+      if (args) {
+        this[info.property] = this[info.methodName].apply(this, args);
+      }
+    },
+
+    annotatedComputationEffect: function(source, value, info) {
+      var args = Polymer.Bind._marshalArgs(this._data, info.args);
+      if (args) {
+        var value = this[info.methodName].apply(this, args);
+        this._applyEffectValue(value, info);
+      }
+    },
+
+    _marshalArgs: function(model, properties) {
+      var a=[];
+      for (var i=0, l=properties.length, v; i<l; i++) {
+        v = model[properties[i]];
+        if (v === undefined) {
+          return;
+        }
+        a[i] = v;
+      }
+      return a;
+    }
+
+  });
+
+</script>
+<script>
+
+  /**
+   * Support for the declarative property sugaring via mustache `{{ }}`
+   * annotations in templates, and via the `properties` objects on
+   * prototypes.
+   *
+   * Example:
+   *
+   *     <template>
+   *       <span hidden="{{hideSpan}}">{{name}}</span> is on the hook.
+   *     </template>
+   *
+   * The `properties` object syntax is as follows:
+   *
+   *     Polymer({
+   *
+   *       properties: {
+   *         myProp: {
+   *           observer: 'myPropChanged',
+   *           computed: 'computemyProp(input1, input2)'
+   *         }
+   *       }
+   *
+   *       ...
+   *
+   *     });
+   *
+   * The `bind` feature also provides an API for registering effects against
+   * properties.
+   *
+   * Property effects can be created imperatively, by template-annotations
+   * (e.g. mustache notation), or by declaration in the `properties` object.
+   *
+   * The effect data is consumed by the `bind` subsystem (`/src/bind/*`),
+   * which compiles the effects into efficient JavaScript that is triggered,
+   * e.g., when a property is set to a new value.
+   *
+   * @class data feature: bind
+   */
+
+  Polymer.Base.addFeature({
+
+    _addPropertyEffect: function(property, kind, effect) {
+     // TODO(sjmiles): everything to the right of the first '.' is lost, implies
+     // there is some duplicate information flow (not the only sign)
+     var model = property.split('.').shift();
+     Polymer.Bind.addPropertyEffect(this, model, kind, effect);
+    },
+
+    // prototyping
+
+    _prepEffects: function() {
+      Polymer.Bind.prepareModel(this);
+      this._addPropertyEffects(this.properties);
+      this._addObserverEffects(this.observers);
+      this._addAnnotationEffects(this._annotes);
+      Polymer.Bind.createBindings(this);
+    },
+
+    _addPropertyEffects: function(effects) {
+      if (effects) {
+        for (var n in effects) {
+          var effect = effects[n];
+          if (effect.observer) {
+            this._addObserverEffect(n, effect.observer);
+          }
+          if (effect.computed) {
+            this._addComputedEffect(n, effect.computed);
+          }
+          if (this.isNotifyProperty(n)) {
+            this._addPropertyEffect(n, 'notify');
+          }
+          if (this.isReflectedProperty(n)) {
+            this._addPropertyEffect(n, 'reflect');
+          }
+        }
+      }
+    },
+
+    _addComputedEffect: function(name, expression) {
+      var index = expression.indexOf('(');
+      var method = expression.slice(0, index);
+      var args = expression.slice(index + 1, -1).replace(/ /g, '').split(',');
+      //console.log('%c on [%s] compute [%s] via [%s]', 'color: green', args[0], name, method);
+      var effect = {
+        property: name,
+        args: args,
+        methodName: method
+      };
+      for (var i=0; i<args.length; i++) {
+        this._addPropertyEffect(args[i], 'compute', effect);
+      }
+    },
+
+    _addObserverEffects: function(effects) {
+      for (var n in effects) {
+        this._addObserverEffect(n, effects[n]);
+      }
+    },
+
+    _addObserverEffect: function(property, observer) {
+      var effect = {
+        method: observer
+      };
+      var props = property.split(' ');
+      if (props.length == 1) {
+        // Single property synchronous observer (supports paths)
+        var model = property.split('.').shift();
+        if (model != property) {
+          // TODO(kschaaf): path observers won't get the right `new` argument
+          this.addPathObserver(property, observer);
+        }
+        effect.property = model;
+        this._addPropertyEffect(model, 'observer', effect);
+      } else {
+        // Multiple-property observer
+        effect.properties = props;
+        for (var i=0, l=props.length; i<l; i++) {
+          this._addPropertyEffect(props[i], 'observer', effect);
+        }
+      }
+    },
+
+    _addAnnotationEffects: function(effects) {
+      // create a virtual annotation list, must be concretized at instance time
+      this._nodes = [];
+      // process annotations that have been parsed from template
+      effects.forEach(function(note) {
+        // where to find the node in the concretized list
+        var index = this._nodes.push(note) - 1;
+        note.bindings.forEach(function(effect) {
+          this._addAnnotationEffect(effect, index);
+        }, this);
+      }, this);
+    },
+
+    _addAnnotationEffect: function(effect, index) {
+      // TODO(sjmiles): annotations have 'effects' proper and 'listener'
+      if (Polymer.Bind._shouldAddListener(effect)) {
+        // <node>.on.<dash-case-property>-changed: <path> = e.detail.value
+        Polymer.Bind._addAnnotatedListener(this, index,
+          effect.name, effect.value, effect.event);
+      }
+      var computed = effect.value.match(/(\w*)\((.*)\)/);
+      if (computed) {
+        var method = computed[1];
+        var args = computed[2].split(/[^\w]+/);
+        this._addAnnotatedComputationEffect(method, args, effect, index);
+      } else {
+        // capture the node index
+        effect.index = index;
+        // discover top-level property (model) from path
+        var model = effect.value.split('.').shift();
+        // add 'annotation' binding effect for property 'model'
+        this._addPropertyEffect(model, 'annotation', effect);
+      }
+    },
+
+    _addAnnotatedComputationEffect: function(method, args, info, index) {
+      var effect = {
+        kind: info.kind,
+        property: info.name,
+        index: index,
+        args: args,
+        methodName: method
+      };
+      for (var i=0, l=args.length; i<l; i++) {
+        this._addPropertyEffect(args[i], 'annotatedComputation', effect);
+      }
+    },
+
+    // instancing
+
+    _marshalInstanceEffects: function() {
+      Polymer.Bind.prepareInstance(this);
+      Polymer.Bind.setupBindListeners(this);
+    },
+
+    _applyEffectValue: function(value, info) {
+      var node = this._nodes[info.index];
+      // TODO(sorvell): ideally, the info object is normalized for easy 
+      // lookup here.
+      var property = info.property || info.name || 'textContent';
+      // TODO(sorvell): consider pre-processing this step so we don't need
+      // this lookup.
+      // if (info._class === undefined) {
+      //   info._class = (property === 'class' || property === 'className');
+      // }
+      // if (info._class) {
+      //   value = this._scopeElementClass(node, value);
+      // }
+      if (info.kind == 'attribute') {
+        this.serializeValueToAttribute(value, property, node);
+      } else {
+        return node[property] = value;
+      }
+    }
+
+  });
+
+</script>
+<script>
+
+  /*
+    Process inputs efficiently via a configure lifecycle callback.
+    Configure is called top-down, host before local dom. Users should 
+    implement configure to supply a set of default values for the element by 
+    returning an object containing the properties and values to set.
+
+    Configured values are not immediately set, instead they are set when 
+    an element becomes ready, after its local dom is ready. This ensures
+    that any user change handlers are not called before ready time.
+
+  */
+
+  /*
+  Implementation notes:
+
+  Configured values are collected into _config. At ready time, properties
+  are set to the values in _config. This ensures properties are set child
+  before host and change handlers are called only at ready time. The host
+  will reset a value already propagated to a child, but this is not 
+  inefficient because of dirty checking at the set point.
+
+  Bind notification events are sent when properties are set at ready time
+  and thus received by the host before it is ready. Since notifications result
+  in property updates and this triggers side effects, handling notifications
+  is deferred until ready time.
+
+  In general, events can be heard before an element is ready. This may occur 
+  when a user sends an event in a change handler or listens to a data event
+  directly (on-foo-changed).
+  */
+
+  Polymer.Base.addFeature({
+
+    // storage for configuration
+    _setupConfigure: function(initialConfig) {
+      this._config = initialConfig || {};
+      this._handlers = [];
+    },
+
+    // static attributes are deserialized into _config
+    _takeAttributes: function() {
+      this._takeAttributesToModel(this._config);
+    },
+
+    // at configure time values are stored in _config
+    _configValue: function(name, value) {
+      this._config[name] = value;
+    },
+
+    // configure: returns user supplied default property values
+    // combines with _config to create final property values
+    _configure: function() {
+      this._configureAnnotationReferences();
+      var i;
+      // get individual default values from property config
+      var config = {};
+      for (i in this.properties) {
+        var c = this.properties[i];
+        if (c.value !== undefined) {
+          if (typeof c.value == 'function') {
+            config[i] = c.value.call(this, this._config);
+          } else {
+            config[i] = c.value;
+          }
+        }
+      }
+      // get add'l default values from central configure 
+      this.simpleMixin(config, this.configure(this._config));
+      // combine defaults returned from configure with inputs in _config
+      this.simpleMixin(config, this._config);
+      // this is the new _config, which are the final values to be applied
+      this._config = config;
+      // pass configuration data to bindings
+      this._distributeConfig(this._config);
+    },
+
+    simpleMixin: function(a, b) {
+      for (var i in b) {
+        a[i] = b[i];
+      }
+    },
+
+    // distribute config values to bound nodes.
+    _distributeConfig: function(config) {
+      var fx$ = this._propertyEffects;
+      if (fx$) {
+        for (var p in config) {
+          var fx = fx$[p];
+          if (fx) {
+            for (var i=0, l=fx.length, x; (i<l) && (x=fx[i]); i++) {
+              if (x.kind === 'annotation') {
+                var node = this._nodes[x.effect.index];
+                // seeding configuration only
+                if (node._configValue) {
+                  var value = (p === x.effect.value) ? config[p] :
+                    this.getPathValue(x.effect.value, config);
+                  node._configValue(x.effect.name, value);
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    _beforeReady: function() {
+      this._applyConfig(this._config);
+      this._flushHandlers();
+    },
+
+    // NOTE: values are already propagated to children via 
+    // _distributeConfig so propagation triggered by effects here is 
+    // redundant, but safe due to dirty checking
+    _applyConfig: function(config) {
+      for (var n in config) {
+        // Don't stomp on values that may have been set by other side effects
+        if (this[n] === undefined) {
+          this[n] = config[n];
+        }
+      }
+    },
+
+    // NOTE: Notifications can be processed before ready since
+    // they are sent at *child* ready time. Since notifications cause side
+    // effects and side effects must not be processed before ready time,
+    // handling is queue/defered until then.
+    _notifyListener: function(fn, e) {
+      if (!this._readied) {
+        this._queueHandler([fn, e, e.target]);
+      } else {
+        return fn.call(this, e, e.target);
+      }
+    },
+
+    _queueHandler: function(args) {
+      this._handlers.push(args);
+    },
+
+    _flushHandlers: function() {
+      var h$ = this._handlers;
+      for (var i=0, l=h$.length, h; (i<l) && (h=h$[i]); i++) {
+        h[0].call(this, h[1], h[2]);
+      }
+    }
+
+  });
+
+</script><script>
+
+  /**
+   * Changes to an object sub-field (aka "path") via a binding
+   * (e.g. `<x-foo value="{{item.subfield}}"`) will notify other elements bound to
+   * the same object automatically.
+   *
+   * When modifying a sub-field of an object imperatively
+   * (e.g. `this.item.subfield = 42`), in order to have the new value propagated
+   * to other elements, a special `setPathValue(path, value)` API is provided.
+   * `setPathValue` sets the object field at the path specified, and then notifies the
+   * binding system so that other elements bound to the same path will update.
+   *
+   * Example:
+   *
+   *     Polymer({
+   *
+   *       is: 'x-date',
+   *
+   *       properties: {
+   *         date: {
+   *           type: Object,
+   *           notify: true
+   *          }
+   *       },
+   *
+   *       attached: function() {
+   *         this.date = {};
+   *         setInterval(function() {
+   *           var d = new Date();
+   *           // Required to notify elements bound to date of changes to sub-fields
+   *           // this.date.seconds = d.getSeconds(); <-- Will not notify
+   *           this.setPathValue('date.seconds', d.getSeconds());
+   *           this.setPathValue('date.minutes', d.getMinutes());
+   *           this.setPathValue('date.hours', d.getHours() % 12);
+   *         }.bind(this), 1000);
+   *       }
+   *
+   *     });
+   *
+   *  Allows bindings to `date` sub-fields to update on changes:
+   *
+   *     <x-date date="{{date}}"></x-date>
+   *
+   *     Hour: <span>{{date.hours}}</span>
+   *     Min:  <span>{{date.minutes}}</span>
+   *     Sec:  <span>{{date.seconds}}</span>
+   *
+   * @class data feature: path notification
+   */
+
+  Polymer.Base.addFeature({
+    /**
+      Notify that a path has changed. For example:
+
+          this.item.user.name = 'Bob';
+          this.notifyPath('item.user.name', this.item.user.name);
+
+      Returns true if notification actually took place, based on
+      a dirty check of whether the new value was already known
+    */
+    notifyPath: function(path, value, fromAbove) {
+      var old = this._propertySet(path, value);
+      // manual dirty checking for now...
+      if (old !== value) {
+        //console.group(this.localName + '#' + this.id + ' ' + path);
+        // Take path effects at this level for exact path matches,
+        // and notify down for any bindings to a subset of this path
+        this._pathEffector(path, value);
+        // Send event to notify the path change upwards
+        // Optimization: don't notify up if we know the notification
+        // is coming from above already (avoid wasted event dispatch)
+        if (!fromAbove) {
+          // TODO(sorvell): should only notify if notify: true?
+          this._notifyPath(path, value);
+        }
+        //console.groupEnd(this.localName + '#' + this.id + ' ' + path);
+      }
+    },
+
+    /**
+      Convienence method for setting a value to a path and calling
+      notify path
+    */
+    setPathValue: function(path, value) {
+      var parts = path.split('.');
+      if (parts.length > 1) {
+        var last = parts.pop();
+        var prop = this;
+        while (parts.length) {
+          prop = prop[parts.shift()];
+          if (!prop) {
+            return;
+          }
+        }
+        // TODO(kschaaf): want dirty-check here?
+        // if (prop[last] !== value) {
+          prop[last] = value;
+          this.notifyPath(path, value);
+        // }
+      } else {
+        this[path] = value;
+      }
+    },
+
+    getPathValue: function(path, root) {
+      var parts = path.split('.');
+      var last = parts.pop();
+      var prop = root || this;
+      while (parts.length) {
+        prop = prop[parts.shift()];
+        if (!prop) {
+          return;
+        }
+      }
+      return prop[last];
+    },
+
+    addPathObserver: function(path, method) {
+      var fx$ = this._pathEffects || (this._pathEffects = []);
+      var match = path.indexOf('.*') == (path.length-2);
+      if (match) {
+        path = path.slice(0, -2);
+      }
+      fx$.push({path: path, match: match, method: method});
+    },
+
+    // TODO(kschaaf): This machine can be optimized to memoize compiled path
+    // effectors as new paths are notified for performance, since it involves
+    // a fair amount of runtime lookup
+    _pathEffector: function(path, value) {
+      // get root property
+      var model = this._modelForPath(path);
+      // search property effects of the root property for 'annotation' effects
+      var fx$ = this._propertyEffects[model];
+      if (fx$) {
+        fx$.forEach(function(fx) {
+          if (fx.kind === 'annotation') {
+            // locate the bound node
+            var n = this._nodeForBinding(fx.effect);
+            if (n) {
+              // perform the effect
+              this._performAnnotationPathEffect(n, path, value, fx.effect);
+            }
+          }
+        }, this);
+      }
+      // iterate and perform _pathEffects matching path
+      if (this._pathEffects) {
+        this._pathEffects.forEach(function(fx) {
+          this._performPathEffect(path, value, fx);
+        }, this);
+      }
+      // notify runtime-bound paths
+      if (this._boundPaths) {
+        this._notifyBoundPaths(path, value);
+      }
+    },
+
+    _nodeForBinding: function(info) {
+      return info.id ? this.$[info.id] : this._nodes[info.index];
+    },
+
+    _performAnnotationPathEffect: function(node, path, value, effect) {
+      if (effect.value === path || effect.value.indexOf(path + '.') === 0) {
+        // TODO(sorvell): ideally the effect function is on this prototype
+        // so we don't have to call it like this.
+        Polymer.Bind.annotationEffect.call(this, path, value, effect);
+        // path == item.stuff.count
+        // value == item.stuff
+        // name == zizz
+        // calls effect n.notifyPath for zizz.count
+      } else if ((path.indexOf(effect.value + '.') === 0) &&
+                  node.notifyPath && !effect.negate) {
+        var p = this._fixPath(effect.name , effect.value, path);
+        node.notifyPath(p, value, true);
+      }
+    },
+
+    _performPathEffect: function(path, value, fx) {
+      if (fx.path == path || (fx.match && path.indexOf(fx.path) === 0)) {
+        var fn = this[fx.method];
+        if (fn) {
+          // TODO(kschaaf): sending null for old; no good way to get it?
+          fn.call(this, value, null, path);
+        }
+      }
+    },
+
+    bindPaths: function(to, from) {
+      this._boundPaths = this._boundPaths || {};
+      if (from) {
+        this._boundPaths[to] = from;
+        // this.setPathValue(to, this.getPathValue(from));
+      } else {
+        this.unbindPath(to);
+        // this.setPathValue(to, from);
+      }
+    },
+
+    unbindPaths: function(path) {
+      if (this._boundPaths) {
+        delete this._boundPaths[path];
+      }
+    },
+
+    _notifyBoundPaths: function(path, value) {
+      var from, to;
+      for (var a in this._boundPaths) {
+        var b = this._boundPaths[a];
+        if (path.indexOf(a + '.') == 0) {
+          from = a;
+          to = b;
+          break;
+        }
+        if (path.indexOf(b + '.') == 0) {
+          from = b;
+          to = a;
+          break;
+        }
+      }
+      if (from && to) {
+        var p = this._fixPath(to, from, path);
+        this.notifyPath(p, value);
+      }
+    },
+
+    _fixPath: function(property, root, path) {
+      return property + path.slice(root.length);
+    },
+
+    _notifyPath: function(path, value) {
+      var rootName = this._modelForPath(path);
+      var dashCaseName = Polymer.CaseMap.camelToDashCase(rootName);
+      var eventName = dashCaseName + this._EVENT_CHANGED;
+      this.fire(eventName, {
+        path: path,
+        value: value
+      }, null, false);
+    },
+
+    _modelForPath: function(path) {
+      return path.split('.').shift();
+    },
+
+    _EVENT_CHANGED: '-changed',
+
+  });
+
+</script>
+<script>
+
+  Polymer.Base.addFeature({
+
+    resolveUrl: function(url) {
+      // TODO(sorvell): do we want to put the module reference on the prototype?
+      var module = Polymer.DomModule.import(this.is);
+      var root = '';
+      if (module) {
+        var assetPath = module.getAttribute('assetpath') || '';
+        root = Polymer.ResolveUrl.resolveUrl(assetPath, module.ownerDocument.baseURI);
+      }
+      return Polymer.ResolveUrl.resolveUrl(url, root);
+    }
+
+  });
+
+</script>
+<script>
+
+/*
+  Extremely simple css parser. Intended to be not more than what we need
+  and definitely not necessarly correct =).
+*/
+(function() {
+
+  // given a string of css, return a simple rule tree
+  function parse(text) {
+    text = clean(text);
+    return parseCss(lex(text), text);
+  }
+
+  // remove stuff we don't care about that may hinder parsing
+  function clean(cssText) {
+    return cssText.replace(rx.comments, '').replace(rx.port, '');
+  }
+
+  // super simple {...} lexer that returns a node tree
+  function lex(text) {
+    var root = {start: 0, end: text.length};
+    var n = root;
+    for (var i=0, s=0, l=text.length; i < l; i++) {
+      switch (text[i]) {
+        case OPEN_BRACE:
+          //console.group(i);
+          if (!n.rules) {
+            n.rules = [];
+          }
+          var p = n;
+          var previous = p.rules[p.rules.length-1];
+          n = {start: i+1, parent: p, previous: previous};
+          p.rules.push(n);
+          break;
+        case CLOSE_BRACE: 
+          //console.groupEnd(n.start);
+          n.end = i+1;
+          n = n.parent || root;
+          break;
+      }
+    }
+    return root;
+  }
+
+  // add selectors/cssText to node tree
+  function parseCss(node, text) {
+    var t = text.substring(node.start, node.end-1);
+    node.cssText = t.trim();
+    if (node.parent) {
+      var ss = node.previous ? node.previous.end : node.parent.start;
+      t = text.substring(ss, node.start-1);
+      // TODO(sorvell): ad hoc; make selector include only after last ;
+      // helps with mixin syntax
+      t = t.substring(t.lastIndexOf(';')+1);
+      node.selector = t.trim();
+    }
+    var r$ = node.rules;
+    if (r$) {
+      for (var i=0, l=r$.length, r; (i<l) && (r=r$[i]); i++) {
+        parseCss(r, text);
+      }  
+    }
+    return node;  
+  }
+
+  // stringify parsed css.
+  function stringify(node, text) {
+    text = text || '';
+    // calc rule cssText
+    var cssText = '';
+    if (node.cssText || node.rules) {
+      var r$ = node.rules;
+      if (r$ && !hasMixinRules(r$)) {
+        for (var i=0, l=r$.length, r; (i<l) && (r=r$[i]); i++) {
+          cssText = stringify(r, cssText);
+        }  
+      } else {
+        cssText = removeCustomProps(node.cssText).trim();
+        if (cssText) {
+          cssText = '  ' + cssText + '\n';
+        }
+      }
+    }
+    // emit rule iff there is cssText
+    if (cssText) {
+      if (node.selector) {
+        text += node.selector + ' ' + OPEN_BRACE + '\n';
+      }
+      text += cssText;
+      if (node.selector) {
+        text += CLOSE_BRACE + '\n\n';
+      }
+    }
+    return text;
+  }
+
+  var OPEN_BRACE = '{';
+  var CLOSE_BRACE = '}';
+
+  function hasMixinRules(rules) {
+    return (rules[0].selector.indexOf(VAR_START) >= 0);
+  }
+
+  function removeCustomProps(cssText) {
+    return cssText
+      .replace(rx.customProp, '')
+      .replace(rx.mixinProp, '')
+      .replace(rx.mixinApply, '');
+  }
+
+  var VAR_START = '--';
+
+  // helper regexp's
+  var rx = {
+    comments: /\/\*[^*]*\*+([^/*][^*]*\*+)*\//gim,
+    port: /@import[^;]*;/gim,
+    customProp: /--[^;{]*?:[^{};]*?;/gim,
+    mixinProp: /--[^;{]*?:[^{;]*?{[^}]*?}/gim,
+    mixinApply: /@mixin[\s]*\([^)]*?\)[\s]*;/gim
+  };
+
+  // exports 
+  Polymer.CssParse = {
+    parse: parse,
+    stringify: stringify
+  };
+
+})();
+
+</script><script>
+
+  (function() {
+
+    function toCssText(rules, callback) {
+      if (typeof rules === 'string') {
+        rules = Polymer.CssParse.parse(rules);
+      } 
+      if (callback) {
+        forEachStyleRule(rules, callback);
+      }
+      return Polymer.CssParse.stringify(rules);
+    }
+
+    function forEachStyleRule(node, cb) {
+      var s = node.selector;
+      var skipRules = false;
+      if (s) {
+        if ((s.indexOf(AT_RULE) !== 0) && (s.indexOf(MIXIN_SELECTOR) !== 0)) {
+          cb(node);
+        }
+        skipRules = (s.indexOf(KEYFRAME_RULE) >= 0) || 
+          (s.indexOf(MIXIN_SELECTOR) >= 0);
+      }
+      var r$ = node.rules;
+      if (r$ && !skipRules) {
+        for (var i=0, l=r$.length, r; (i<l) && (r=r$[i]); i++) {
+          forEachStyleRule(r, cb);
+        }
+      }
+    }
+
+    // add a string of cssText to the document.
+    function applyCss(cssText, moniker, target, lowPriority) {
+      var style = document.createElement('style');
+      if (moniker) {
+        style.setAttribute('scope', moniker);
+      }
+      style.textContent = cssText;
+      target = target || document.head;
+      if (lowPriority) {
+        var n$ = target.querySelectorAll('style[scope]');
+        var ref = n$.length ? n$[n$.length-1].nextSibling : target.firstChild;
+        target.insertBefore(style, ref);
+     } else {
+        target.appendChild(style);
+      }
+      return style;
+    }
+
+    var AT_RULE = '@';
+    var KEYFRAME_RULE = 'keyframe';
+    var MIXIN_SELECTOR = '--';
+
+    // exports
+    Polymer.StyleUtil = {
+      parser: Polymer.CssParse,
+      applyCss: applyCss,
+      forEachStyleRule: forEachStyleRule,
+      toCssText: toCssText
+    };
+
+  })();
+
+</script><script>
+
+  (function() {
+
+    /* Transforms ShadowDOM styling into ShadyDOM styling
+
+     * scoping: 
+
+        * elements in scope get scoping selector class="x-foo-scope"
+        * selectors re-written as follows:
+
+          div button -> div.x-foo-scope button.x-foo-scope
+
+     * :host -> scopeName
+
+     * :host(...) -> scopeName...
+
+     * ::content -> ' ' NOTE: requires use of scoping selector and selectors
+       cannot otherwise be scoped:
+       e.g. :host ::content > .bar -> x-foo > .bar
+
+     * ::shadow, /deep/: processed simimlar to ::content
+
+     * :host-context(...): NOT SUPPORTED
+
+    */
+
+    // Given a node and scope name, add a scoping class to each node 
+    // in the tree. This facilitates transforming css into scoped rules. 
+    function transformDom(node, scope) {
+      _transformDom(node, scope ? scope + SCOPE_SUFFIX : '');
+    }
+
+    function _transformDom(node, selector) {
+      if (node.setAttribute) {
+        node.setAttribute(SCOPE_ATTR, selector);
+      }
+      var c$ = Polymer.dom(node).childNodes;
+      for (var i=0; i<c$.length; i++) {
+        _transformDom(c$[i], selector);
+      }
+    }
+
+    function transformElement(element, scope) {
+      element.setAttribute(SCOPE_ATTR, scope + SCOPE_SUFFIX);
+    }
+
+    function transformHost(host, scope) {
+    }
+
+    // Given a string of cssText and a scoping string (scope), returns
+    // a string of scoped css where each selector is transformed to include
+    // a class created from the scope. ShadowDOM selectors are also transformed
+    // (e.g. :host) to use the scoping selector.
+    function transformCss(rules, scope, ext, callback) {
+      var hostScope = calcHostScope(scope, ext);
+      return Polymer.StyleUtil.toCssText(rules, function(rule) {
+        transformRule(rule, scope, hostScope);
+        if (callback) {
+          callback(rule, scope, hostScope);
+        }
+      });
+    }
+
+    function calcHostScope(scope, ext) {
+      return ext ? '[is=' +  scope + ']' : scope;
+    }
+
+    function transformRule(rule, scope, hostScope) {
+      _transformRule(rule, transformComplexSelector,
+        scope, hostScope);
+    }
+
+    // transforms a css rule to a scoped rule.
+    function _transformRule(rule, transformer, scope, hostScope) {
+      var p$ = rule.selector.split(COMPLEX_SELECTOR_SEP);
+      for (var i=0, l=p$.length, p; (i<l) && (p=p$[i]); i++) {
+        p$[i] = transformer(p, scope, hostScope);
+      }
+      rule.selector = p$.join(COMPLEX_SELECTOR_SEP);
+    }
+
+    function transformComplexSelector(selector, scope, hostScope) {
+      var stop = false;
+      selector = selector.replace(SIMPLE_SELECTOR_SEP, function(m, c, s) {
+        if (!stop) {
+          var o = transformCompoundSelector(s, c, scope, hostScope);
+          if (o.stop) {
+            stop = true;
+          }
+          c = o.combinator;
+          s = o.value;  
+        }
+        return c + s;
+      });
+      return selector;
+    }
+
+    function transformCompoundSelector(selector, combinator, scope, hostScope) {
+      // replace :host with host scoping class
+      var jumpIndex = selector.search(SCOPE_JUMP);
+      if (selector.indexOf(HOST) >=0) {
+        // :host(...)
+        selector = selector.replace(HOST_PAREN, function(m, host, paren) {
+          return hostScope + paren;
+        });
+        // now normal :host
+        selector = selector.replace(HOST, hostScope);
+      // replace other selectors with scoping class
+      } else if (jumpIndex !== 0) {
+        selector = scope ? transformSimpleSelector(selector, scope) : selector;
+      }
+      // remove left-side combinator when dealing with ::content.
+      if (selector.indexOf(CONTENT) >= 0) {
+        combinator = '';
+      }
+      // process scope jumping selectors up to the scope jump and then stop
+      // e.g. .zonk ::content > .foo ==> .zonk.scope > .foo
+      var stop;
+      if (jumpIndex >= 0) {
+        selector = selector.replace(SCOPE_JUMP, ' ');
+        stop = true;
+      }
+      return {value: selector, combinator: combinator, stop: stop};
+    }
+
+    function transformSimpleSelector(selector, scope) {
+      var p$ = selector.split(PSEUDO_PREFIX);
+      p$[0] += CSS_PREFIX + scope + SCOPE_SUFFIX + CSS_SUFFIX;
+      return p$.join(PSEUDO_PREFIX);
+    }
+
+    function transformRootRule(rule) {
+      _transformRule(rule, transformRootSelector);
+    }
+
+    function transformRootSelector(selector) {
+      return selector.match(SCOPE_JUMP) ?
+        transformComplexSelector(selector) :
+        selector.trim() + SCOPE_ROOT_SELECTOR;
+    }
+
+    var SCOPE_ATTR = 'style-scope';
+    var SCOPE_ROOT_SELECTOR = ':not([' + SCOPE_ATTR + '])';
+    var SCOPE_SUFFIX = '';
+    var COMPLEX_SELECTOR_SEP = ',';
+    var SIMPLE_SELECTOR_SEP = /(^|[\s>+~]+)([^\s>+~]+)/g;
+    var HOST = ':host';
+    // NOTE: this supports 1 nested () pair for things like 
+    // :host(:not([selected]), more general support requires
+    // parsing which seems like overkill
+    var HOST_PAREN = /(\:host)(?:\(((?:\([^)(]*\)|[^)(]*)+?)\))/g;
+    var CONTENT = '::content';
+    var SCOPE_JUMP = /\:\:content|\:\:shadow|\/deep\//;
+    var CSS_PREFIX = '[' + SCOPE_ATTR + '=';
+    var CSS_SUFFIX = ']';
+    var PSEUDO_PREFIX = ':';
+    var SCOPING_CLASS = /(?:^|\s)([\S]*?-x)(?:$|\s)/;
+
+    // exports
+    Polymer.StyleTransformer = {
+      element: transformElement,
+      dom: transformDom,
+      host: transformHost,
+      css: transformCss,
+      rule: transformRule,
+      rootRule: transformRootRule,
+      SCOPE_SUFFIX: SCOPE_SUFFIX
+    };
+
+  })();
+
+</script>
+<script>
+
+  (function() {
+
+    var prepTemplate = Polymer.Base._prepTemplate;
+    var prepElement = Polymer.Base._prepElement;
+    var baseStampTemplate = Polymer.Base._stampTemplate;
+
+    Polymer.Base.addFeature({
+
+      // declaration-y
+      _prepTemplate: function() {
+        prepTemplate.call(this);
+        var port = Polymer.DomModule.import(this.is);
+        if (this._encapsulateStyle === undefined) {
+          this._encapsulateStyle = 
+            Boolean(port && !Polymer.Settings.useNativeShadow);
+        }
+        // scope css
+        // NOTE: dom scoped via annotations
+        if (Polymer.Settings.useNativeShadow || this._encapsulateStyle) {
+          this._scopeCss();
+        }
+      },
+
+      _prepElement: function(element) {
+        if (this._encapsulateStyle) {
+          Polymer.StyleTransformer.element(element, this.is);
+        }
+        prepElement.call(this, element);
+      },
+
+      _scopeCss: function() {
+        this._styles = this._prepareStyles();
+        this._scopeStyles(this._styles);
+      },
+
+      // search for extra style modules via `styleModules`
+      _prepareStyles: function() {
+        var cssText = '', m$ = this.styleModules;
+        if (m$) {
+          for (var i=0, l=m$.length, m; (i<l) && (m=m$[i]); i++) {
+            cssText += this._cssFromModule(m);
+          }
+        }
+        cssText += this._cssFromModule(this.is);
+        var styles = [];
+        if (cssText) {
+          var s = document.createElement('style');
+          s.textContent = cssText;  
+          styles.push(s);
+        }
+        return styles;
+      },
+
+      // returns cssText of styles in a given module; also un-applies any
+      // styles that apply to the document.
+      _cssFromModule: function(moduleId) {
+        var m = Polymer.DomModule.import(moduleId);
+        if (m && !m._cssText) {
+          var cssText = '';
+          var e$ = Array.prototype.slice.call(m.querySelectorAll('style'));
+          this._unapplyStyles(e$);
+          e$ = e$.concat(Array.prototype.map.call(
+            m.querySelectorAll(REMOTE_SHEET_SELECTOR), function(l) {
+              return l.import.body;
+            }));
+          m._cssText = this._cssFromStyles(e$);
+        }
+        return m && m._cssText || '';
+      },
+
+      _cssFromStyles: function(styles) {
+        var cssText = '';
+        for (var i=0, l=styles.length, s; (i<l) && (s = styles[i]); i++) {
+          if (s && s.textContent) {
+            cssText += 
+              Polymer.ResolveUrl.resolveCss(s.textContent, s.ownerDocument);
+          }
+        }
+        return cssText;
+      },
+
+      _unapplyStyles: function(styles) {
+        for (var i=0, l=styles.length, s; (i<l) && (s = styles[i]); i++) {
+          s = s.__appliedElement || s;
+          s.parentNode.removeChild(s);
+        }
+      },
+
+      _scopeStyles: function(styles) {
+        for (var i=0, l=styles.length, s; (i<l) && (s=styles[i]); i++) {
+          // transform style if necessary and place in correct place
+          if (Polymer.Settings.useNativeShadow) {
+            if (this._template) {
+              this._template.content.appendChild(s);
+            }
+          } else {
+            var rules = this._rulesForStyle(s);
+            Polymer.StyleUtil.applyCss(
+              Polymer.StyleTransformer.css(rules, this.is, this.extends), 
+              this.is, null, true);
+          }
+        }
+      },
+
+      _rulesForStyle: function(style) {
+        if (!style.__cssRules) {
+          style.__cssRules = Polymer.StyleUtil.parser.parse(style.textContent);
+        }
+        return style.__cssRules;
+      },
+
+      // instance-y
+      _stampTemplate: function() {
+        if (this._encapsulateStyle) {
+          Polymer.StyleTransformer.host(this, this.is);
+        }
+        baseStampTemplate.call(this);
+      },
+
+      // add scoping class whenever an element is added to localDOM
+      _elementAdd: function(node) {
+        if (this._encapsulateStyle && !node.__styleScoped) {
+          Polymer.StyleTransformer.dom(node, this.is);
+        }
+      },
+
+      // remove scoping class whenever an element is removed from localDOM
+      _elementRemove: function(node) {
+        if (this._encapsulateStyle) {
+          Polymer.StyleTransformer.dom(node, '');
+        }
+      }
+
+    });
+
+    var REMOTE_SHEET_SELECTOR = 'link[rel=import][type~=css]';
+
+  })();
+
+</script>
+<script>
+
+  (function() {
+    
+    var defaultSheet = document.createElement('style'); 
+
+    function applyCss(cssText) {
+      defaultSheet.textContent += cssText;
+      defaultSheet.__cssRules =
+        Polymer.StyleUtil.parser.parse(defaultSheet.textContent);
+    }
+
+    applyCss('');
+
+    // exports
+    Polymer.StyleDefaults = {
+      applyCss: applyCss,
+      defaultSheet: defaultSheet
+    };
+
+  })();
+</script>
+<script>
+  (function() {
+    
+    var baseAttachedCallback = Polymer.Base.attachedCallback;
+
+    // TODO(sorvell): consider if calculating properties and applying
+    // styles with properties should be separate modules.
+    Polymer.Base.addFeature({
+
+      attachedCallback: function() {
+        baseAttachedCallback.call(this);
+        if (this.enableCustomStyleProperties && !this._scopeSelector) {
+          this._updateOwnStyles();
+        }
+      },
+
+      _updateOwnStyles: function() {
+        if (this.enableCustomStyleProperties) {
+          this._styleProperties = this._computeStyleProperties();
+          this.applyStyleProperties(this._styleProperties);
+        }
+      },
+
+      _computeStyleProperties: function() {
+        var props = {};
+        this.simpleMixin(props, this._computeStylePropertiesFromHost());        
+        this.simpleMixin(props, this._computeOwnStyleProperties());
+        this._reifyCustomProperties(props);
+        return props;
+      },
+
+      _computeStylePropertiesFromHost: function() {
+        // TODO(sorvell): experimental feature, global defaults!
+        var props = {}, styles = [Polymer.StyleDefaults.defaultSheet];
+        if (this.host) {
+          // enable finding styles in hosts without `enableStyleCustomProperties`
+          if (!this.host._styleProperties) {
+            this.host._styleProperties = this.host._computeStyleProperties();
+          }
+          props = Object.create(this.host._styleProperties);
+          styles = this.host._styles;
+        }
+        this.simpleMixin(props,
+          this._customPropertiesFromStyles(styles, this.host));
+        return props;
+        
+      },
+
+      _computeOwnStyleProperties: function() {
+        var props = {};
+        this.simpleMixin(props, this._customPropertiesFromStyles(this._styles));
+        if (this.styleProperties) {
+          for (var i in this.styleProperties) {
+            props[i] = this.styleProperties[i];
+          }
+        }
+        return props;
+      },
+
+      _customPropertiesFromStyles: function(styles, hostNode) {
+        var props = {};
+        var p = this._customPropertiesFromRule.bind(this, props, hostNode);
+        if (styles) {
+          for (var i=0, l=styles.length, s; (i<l) && (s=styles[i]); i++) {
+            Polymer.StyleUtil.forEachStyleRule(this._rulesForStyle(s), p);
+          }
+        }
+        return props;
+      },
+
+      // test if a rule matches the given node and if so, 
+      // collect any custom properties
+      // TODO(sorvell): support custom variable assignment within mixins
+      _customPropertiesFromRule: function(props, hostNode, rule) {
+        hostNode = hostNode || this;
+        // TODO(sorvell): file crbug, ':host' does not match element.
+        if (this.elementMatches(rule.selector) ||
+          ((hostNode === this) && (rule.selector === ':host'))) {
+          // --g: var(--b); or --g: 5;
+          this._collectPropertiesFromRule(rule, CUSTOM_VAR_ASSIGN, props);
+          // --g: { ... }
+          this._collectPropertiesFromRule(rule, CUSTOM_MIXIN_ASSIGN, props);
+        }
+      },
+
+      // given a rule and rx that matches key and value, set key in properties
+      // to value
+      _collectPropertiesFromRule: function(rule, rx, properties) {
+        var m;
+        while (m = rx.exec(rule.cssText)) {
+          properties[m[1]] = m[2].trim();
+        }
+      },
+   
+      _reifyCustomProperties: function(props) {
+        for (var i in props) {
+          props[i] = this._valueForCustomProperty(props[i], props);
+        }
+      },
+
+      _valueForCustomProperty: function(property, props) {
+        var cv;
+        while ((typeof property === 'string') && 
+          (cv = property.match(CUSTOM_VAR_VALUE))) {
+          property = props[cv[1]];
+        }
+        return property;
+      },
+
+      // apply styles
+      applyStyleProperties: function(bag) {
+        var s$ = this._styles;
+        if (s$) {
+          var style = styleFromCache(this.is, bag, s$);
+          this._ensureScopeSelector(style ? style._scope : null);
+          if (!style) {
+            var cssText = this._generateCustomStyleCss(bag, s$);
+            style = cssText ? this._applyCustomCss(cssText) : {};
+            cacheStyle(this.is, style, this._scopeSelector, 
+              this._styleProperties, s$);
+          } else if (Polymer.Settings.useNativeShadow) {
+            this._applyCustomCss(style.textContent);
+          }
+          if (style.textContent /*&& !Polymer.Settings.useNativeShadow*/) {
+            this.setAttribute(XSCOPE_ATTR, this._scopeSelector);
+          }
+        }
+      },
+
+      _generateCustomStyleCss: function(properties, styles) {
+        var b = this._applyPropertiesToRule.bind(this, properties);
+        var cssText = '';
+        // TODO(sorvell): don't redo parsing work each time as below; 
+        // instead create a sheet with just custom properties
+        for (var i=0, l=styles.length, s; (i<l) && (s=styles[i]); i++) {
+          cssText += this._transformCss(s.textContent, b) + '\n\n'; 
+        }
+        return cssText.trim();
+      },
+
+      _transformCss: function(cssText, callback) {
+        return Polymer.Settings.useNativeShadow ?
+          Polymer.StyleUtil.toCssText(cssText, callback) : 
+          Polymer.StyleTransformer.css(cssText, this.is, this.extends, callback);
+      },
+
+      _xScopeCount: 0,
+
+      _ensureScopeSelector: function(selector) {
+        if (!this._scopeSelector) {
+          var c = Object.getPrototypeOf(this)._xScopeCount++;
+          this._scopeSelector = selector || (this.is + '-' + c);
+        }
+      },
+
+      _applyCustomCss: function(cssText) {
+        if (this._customStyle) {
+          this._customStyle.textContent = cssText;
+        } else if (cssText) {
+          this._customStyle = Polymer.StyleUtil.applyCss(cssText, 
+            this._scopeSelector,
+            Polymer.Settings.useNativeShadow ? this.root : null);
+        }
+        return this._customStyle;
+      },
+
+      _applyPropertiesToRule: function(properties, rule) {
+        if (!Polymer.Settings.useNativeShadow) {
+          this._scopifyRule(rule);
+        }
+        if (rule.cssText.match(CUSTOM_RULE_RX)) {
+          rule.cssText = this._applyPropertiesToText(rule.cssText, properties);
+        } else {
+          rule.cssText = '';
+        }
+        //console.log(rule.cssText);
+      },
+
+      _applyPropertiesToText: function(cssText, props) {
+        var output = '';
+        var m, v;
+        // e.g. color: var(--color);
+        while (m = CUSTOM_VAR_USE.exec(cssText)) {
+          v = props[m[2]];
+          if (v) {
+            output += '\t' + m[1].trim() + ': ' + this._propertyToCss(v);
+          }
+        }
+        // e.g. @mixin(--stuff);
+        while (m = CUSTOM_MIXIN_USE.exec(cssText)) {
+          v = m[1];
+          if (v) {
+            var parts = v.split(' ');
+            for (var i=0, p; i < parts.length; i++) {
+              p = props[parts[i].trim()];
+              if (p) {
+                output += '\t' + this._propertyToCss(p);
+              }
+            }
+          }
+        }
+        return output;
+      },
+
+      _propertyToCss: function(property) {
+        var p = property.trim();
+        p = p[p.length-1] === ';' ? p : p + ';';
+        return p + '\n';
+      },
+
+      _scopifyRule: function(rule) {
+        var selector = rule.selector;
+        var host = this.is;
+        var rx = new RegExp(host + HOST_SELECTOR_SEP);
+        var parts = selector.split(',');
+        var scope = SCOPE_PREFIX + this._scopeSelector + SCOPE_SUFFIX;
+        for (var i=0, l=parts.length, p; (i<l) && (p=parts[i]); i++) {
+          parts[i] = p.match(rx) ?
+            p.replace(host, host + scope) :
+            scope + ' ' + p;
+        }
+        rule.selector = parts.join(',');
+      },
+
+      updateStyles: function() {
+        this._updateOwnStyles();
+        // TODO(sorvell): temporary way to find local dom that needs 
+        // x-scope styling.
+        var c$ = Polymer.dom(this.root).querySelectorAll('[x-style-scope]');
+        for (var i=0, l= c$.length, c; (i<l) && (c=c$[i]); i++) {
+          if (c.updateStyles) {
+            c.updateStyles();
+          }
+        }
+      }
+
+    });
+    
+    var styleCache = {};
+    function cacheStyle(is, style, scope, bag, styles) {
+      style._scope = scope;
+      style._properties = bag;
+      style._styles = styles;
+      var s$ = styleCache[is] = styleCache[is] || [];
+      s$.push(style);
+    }
+
+    function styleFromCache(is, bag, checkStyles) {
+      var styles = styleCache[is];
+      if (styles) {
+        for (var i=0, s; i < styles.length; i++) {
+          s = styles[i];
+          if (objectsEqual(bag, s._properties) && 
+            objectsEqual(checkStyles,  s._styles)) { 
+            return s;
+          }
+        }
+      }
+    }
+
+    function objectsEqual(a, b) {
+      for (var i in a) {
+        if (a[i] !== b[i]) {
+          return false;
+        }
+      }
+      for (var i in b) {
+        if (a[i] !== b[i]) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    var XSCOPE_ATTR = 'x-style-scope';
+    var SCOPE_PREFIX = '[' + XSCOPE_ATTR + '=';
+    var SCOPE_SUFFIX = ']';
+    var HOST_SELECTOR_SEP = '($|[\\.\\:\\[\\s>\\+~])';
+    var CUSTOM_RULE_RX = /mixin|var/;
+    var CUSTOM_VAR_ASSIGN = /(--[^\:;]*?):\s*?([^;{]*?);/g;
+    var CUSTOM_MIXIN_ASSIGN = /(--[^\:;]*?):[^{;]*?{([^}]*?)}/g;
+    var CUSTOM_VAR_VALUE = /^var\(([^)]*?)\)/;
+    var CUSTOM_VAR_USE = /(?:^|[;}\s])([^;{}]*?):[\s]*?var\(([^)]*)?\)/gim;
+    var CUSTOM_MIXIN_USE = /mixin\(([^)]*)\)/gim;
+
+  })();
+</script>
+<script>
+
+  Polymer.Base.addFeature({
+
+    registerFeatures: function() {
+      this._prepIs();
+      this._prepMixins();
+      this._prepExtends();
+      this._prepConstructor();
+      this._prepTemplate();
+      this._prepAnnotations();
+      this._prepEffects();
+      this._prepContent();
+    },
+
+    initFeatures: function() {
+      this._poolContent();
+      this._setupConfigure();
+      this._pushHost();
+      this._stampTemplate();
+      this._popHost();
+      this._marshalAnnotationReferences();
+      this._marshalInstanceEffects();
+      this._marshalAttributes();
+      this._marshalListeners();
+      this._readyContent();
+    }
+
+  });
+
+</script>
+
+<!-- 
+
+The `x-style` extension of the native `<style>` element allows defining styles
+in the main document that can take advantage of several special features of
+Polymer's styling system:
+
+* Document styles defined in an `x-style` will be shimmed to ensure they do
+not leak into local DOM when running on browsers without non-native Shadow DOM.
+* Shadow DOM-specific `/deep/` and `::shadow` combinators will be shimmed on
+browsers without non-native Shadow DOM.
+* Custom properties used by Polymer's experimental shim for cross-scope styling
+may be defined in an `x-style`.
+
+Example:
+
+```html
+<!doctype html>
+<html>
+<head>
+  <script src="components/webcomponentsjs/webcomponents-lite.js"></script>
+  <link rel="import" href="components/polymer/polymer.html">
+
+  <style is="x-style">
+    
+    /* Will be prevented from affecting local DOM of Polymer elements */
+    * {
+      box-sizing: border-box;
+    }
+    
+    /* Can use /deep/ and ::shadow combinators */
+    body /deep/ .my-special-view::shadow #thing-inside {
+      background: yellow;
+    }
+    
+    /* Custom properties that inherit down the document tree may be defined */
+    body {
+      --my-toolbar-title-color: green;
+    }
+    
+  </style>
+
+</head>
+<body>
+
+    ...
+
+</body>
+</html>
+```
+
+Note, all features of `x-style` are available when defining styles as part of Polymer elements (e.g. `<style>` elements within `<dom-module>`'s used for defining Polymer elements. The `x-style` extension should only be used for defining document styles, outside of a custom element's local DOM.
+
+-->
+
+<script>
+(function() {
+
+  Polymer({
+
+    is: 'x-style',
+    extends: 'style',
+
+    created: function() {
+      var rules = Polymer.StyleUtil.parser.parse(this.textContent);
+      this.applyProperties(rules);
+      // TODO(sorvell): since custom rules must match directly, they tend to be
+      // made with selectors like `*`.
+      // We *remove them here* so they don't apply too widely and nerf recalc.
+      // This means that normal properties mixe in rules with custom 
+      // properties will *not* apply.
+      var cssText = Polymer.StyleUtil.parser.stringify(rules);
+      this.textContent = this.scopeCssText(cssText);
+    },
+
+    scopeCssText: function(cssText) {
+      return Polymer.Settings.useNativeShadow ?
+        cssText :
+        Polymer.StyleUtil.toCssText(cssText, function(rule) {
+          Polymer.StyleTransformer.rootRule(rule);
+      });
+    },
+
+    applyProperties: function(rules) {
+      var cssText = '';
+      Polymer.StyleUtil.forEachStyleRule(rules, function(rule) {
+        if (rule.cssText.match(CUSTOM_RULE)) {
+          // TODO(sorvell): use parser.stringify, it needs an option not to
+          // strip custom properties.
+          cssText += rule.selector + ' {\n' + rule.cssText + '\n}\n';
+        }
+      });
+      if (cssText) {
+        Polymer.StyleDefaults.applyCss(cssText);
+      }
+    }
+
+  });
+
+  var CUSTOM_RULE = /--[^;{'"]*\:/;
+
+})();
+</script>
+<script>
+
+  Polymer({
+
+    is: 'x-autobind',
+
+    extends: 'template',
+
+    registerFeatures: function() {
+      this._prepExtends();
+      this._prepConstructor();
+    },
+
+    _finishDistribute: function() {
+      var parentDom = Polymer.dom(Polymer.dom(this).parentNode);
+      parentDom.insertBefore(this.root, this);
+    },
+
+    initFeatures: function() {
+      this._template = this;
+      this._prepAnnotations();
+      this._prepEffects();
+      Polymer.Base.initFeatures.call(this);
+    }
+
+  });
+
+</script>
+<script>
+
+  Polymer.Templatizer = {
+
+    templatize: function(template) {
+      // TODO(sjmiles): supply _alternate_ content reference missing from root
+      // templates (not nested). `_content` exists to provide content sharing
+      // for nested templates.
+      if (!template._content) {
+        template._content = template.content;
+      }
+      // fast path if template's anonymous class has been memoized
+      if (template._content._ctor) {
+        this.ctor = template._content._ctor;
+        //console.log('Templatizer.templatize: using memoized archetype');
+        return;
+      }
+      // `archetype` is the prototype of the anonymous
+      // class created by the templatizer 
+      var archetype = Object.create(Polymer.Base);
+      archetype.host = this;
+      archetype.contentHost = this._getContentHost();
+      // normally Annotations.parseAnnotations(template) but
+      // archetypes do special caching
+      this.customPrepAnnotations(archetype, template);
+      // setup accessors
+      archetype._prepEffects();
+      // late-binds archetype.listen to host.listen; h.l doesn't exist yet
+      archetype.listen = function() { 
+        this.listen.apply(this, arguments);
+      }.bind(this.host);
+
+      // boilerplate code
+      archetype._notifyPath = this._notifyPathImpl;
+      // boilerplate code
+      var _constructor = this._constructorImpl;
+      var ctor = function TemplateInstance(model) {
+        _constructor.call(this, model);
+      };
+      // standard references
+      ctor.prototype = archetype;
+      archetype.constructor = ctor;
+      // TODO(sjmiles): constructor cache?
+      template._content._ctor = ctor;
+      // TODO(sjmiles): choose less general name
+      this.ctor = ctor;
+    },
+
+    _getContentHost: function() {
+      return (this.host && this.host.contentHost) || this.host;
+    },
+
+    customPrepAnnotations: function(archetype, template) {
+      if (template) {
+        archetype._template = template;
+        var c = template._content;
+        if (c) {
+          var contentHost = archetype.contentHost;
+          if (contentHost) {
+            Polymer.Annotations.prepElement = 
+              contentHost._prepElement.bind(contentHost);
+          }
+          archetype._annotes = c._annotes ||
+            Polymer.Annotations.parseAnnotations(template);
+          c._annotes = archetype._annotes;
+          Polymer.Annotations.prepElement = null;
+        } 
+        else {
+          console.warn('no _content');
+        }
+      }
+      else {
+        console.warn('no _template');
+      }
+    },
+
+    _notifyPathImpl: function() {
+      var pd = this.pathDelegate;
+      if (pd) {
+        var args = Array.prototype.slice.call(arguments);
+        args.unshift(this);
+        pd._notifyDelegatePath.apply(pd, args);
+      }
+    },
+
+    _constructorImpl: function(model) {
+      this._setupConfigure(model);
+      this._pushHost(this.host);
+      this.root = this.instanceTemplate(this._template);
+      this._popHost();
+      this._marshalAnnotatedNodes();
+      this._marshalInstanceEffects();
+      this._marshalAnnotatedListeners();
+      this._readyContent();
+    },
+
+    stamp: function(model) {
+      return new this.ctor(model);
+    }
+
+    // TODO(sorvell): note, using the template as host is ~5-10% faster if 
+    // elements have no default values.
+    // _constructorImpl: function(model, host) {
+    //   this._setupConfigure(model);
+    //   host._beginHost();
+    //   this.root = this.instanceTemplate(this._template);
+    //   host._popHost();
+    //   this._marshalTemplateContent();
+    //   this._marshalAnnotatedNodes();
+    //   this._marshalInstanceEffects();
+    //   this._marshalAnnotatedListeners();
+    //   this._ready();
+    // },
+
+    // stamp: function(model) {
+    //   return new this.ctor(model, this.host);
+    // }
+    
+
+  };
+
+</script><script>
+
+  /**
+   * Creates a pseudo-custom-element that maps property values to bindings
+   * in DOM.
+   * 
+   * `stamp` method creates an instance of the pseudo-element. The instance
+   * references a document-fragment containing the stamped and bound dom
+   * via it's `root` property. 
+   *  
+   */
+  Polymer({
+
+    is: 'x-template',
+    extends: 'template',
+
+    mixins: [
+      Polymer.Templatizer
+    ],
+
+    ready: function() {
+      this.templatize(this);
+    }
+
+  });
+
+</script>
+<script>
+
+(function() {
+
+  var callbacks = new WeakMap();
+  
+  function observe(array, cb) {
+    if (Array.observe) {
+      var ncb = function(changes) {
+        changes = changes.filter(function(o) { return o.type == 'splice'; });
+        if (changes.length) {
+          cb(changes);
+        }
+      };
+      callbacks.set(cb, ncb);
+      Array.observe(array, ncb);
+    } else {
+      if (!array.__polymerObservable) {
+        makeObservable(array);
+      }
+      callbacks.get(array).push(cb);
+    }
+  }
+
+  function unobserve(array, cb) {
+    if (Array.observe) {
+      var ncb = callbacks.get(cb);
+      callbacks.delete(cb);
+      Array.unobserve(array, ncb);
+    } else {
+      var cbs = callbacks.get(array);
+      var idx = cbs.indexOf(cb);
+      if (idx >= 0) {
+        cbs.splice(idx, 1);
+      }
+    }
+  }
+
+  function makeObservable(array) {
+    var splices = [];
+    var debounce;
+    var orig = {
+      push: array.push,
+      pop: array.pop,
+      splice: array.splice,
+      shift: array.shift,
+      unshift: array.unshift,
+      sort: array.sort
+    };
+    var addSplice = function(index, added, removed) {
+      splices.push({
+        index: index,
+        addedCount: added,
+        removed: removed,
+        object: array,
+        type: 'splice'
+      });
+    };
+    callbacks.set(array, []);
+    array.push = function() {
+      debounce = Polymer.Debounce(debounce, fin);
+      addSplice(array.length, 1, []);
+      return orig.push.apply(this, arguments);
+    };
+    array.pop = function() {
+      debounce = Polymer.Debounce(debounce, fin);
+      addSplice(array.length - 1, 0, array.slice(-1));
+      return orig.pop.apply(this, arguments);
+    };
+    array.splice = function(start, deleteCount) {
+      debounce = Polymer.Debounce(debounce, fin);
+      addSplice(start, arguments.length - 2, array.slice(start, start + deleteCount));
+      return orig.splice.apply(this, arguments);
+    };
+    array.shift = function() {
+      debounce = Polymer.Debounce(debounce, fin);
+      addSplice(0, 0, [array[0]]);
+      return orig.shift.apply(this, arguments);
+    };
+    array.unshift = function() {
+      debounce = Polymer.Debounce(debounce, fin);
+      addSplice(0, 1, []);
+      return orig.unshift.apply(this, arguments);
+    };
+    array.sort = function() {
+      debounce = Polymer.Debounce(debounce, fin);
+      console.warn('[ArrayObserve]: sort not observable');
+      return orig.sort.apply(this, arguments);
+    };
+    var fin = function() {
+      var cbs = callbacks.get(array);
+      for (var i=0; i<cbs.length; i++) {
+        cbs[i](splices);
+      }
+      splices = [];
+    };
+    array.__polymerObservable = true;
+  }
+
+  Polymer.ArrayObserve = {
+    observe: observe,
+    unobserve: unobserve
+  };
+  
+})();
+
+</script>
+<script>
+
+  Polymer._collections = new WeakMap();
+
+  Polymer.Collection = function(userArray, noObserve) {
+    Polymer._collections.set(userArray, this);
+    this.userArray = userArray;
+    this.store = userArray.slice();
+    this.callbacks = [];
+    this.debounce = null;
+    this.map = null;
+    this.added = [];
+    this.removed = [];
+    if (!noObserve) {
+      Polymer.ArrayObserve.observe(userArray, this.applySplices.bind(this));
+      this.initMap();
+    }
+  };
+
+  Polymer.Collection.prototype = {
+    constructor: Polymer.Collection,
+
+    initMap: function() {
+      var map = this.map = new WeakMap();
+      var s = this.store;
+      var u = this.userArray;
+      for (var i=0; i<s.length; i++) {
+        var v = s[i];
+        if (v) {
+          switch (typeof v) {
+            case 'string':
+              v = s[i] = u[i]= new String(v);
+              break;
+            case 'number':
+              v = s[i] = u[i]= new Number(v);
+              break;          
+            case 'boolean':
+              v = s[i] = u[i]= new Boolean(v);
+              break;          
+          }
+        map.set(v, i);
+        }
+      }
+    },
+
+    add: function(item, squelch) {
+      var key = this.store.push(item) - 1;
+      if (item != null && this.map) {
+        this.map.set(item, key);
+      }
+      if (!squelch) {
+        this.added.push(key);
+        this.debounce = Polymer.Debounce(this.debounce, this.notify.bind(this));
+      }
+      return key;
+    },
+
+    removeKey: function(key) {
+      if (this.map) {
+        this.map.delete(this.store[key]);
+      }
+      delete this.store[key];
+      this.removed.push(key);
+      this.debounce = Polymer.Debounce(this.debounce, this.notify.bind(this));
+    },
+
+    remove: function(item, squelch) {
+      var key = this.getKey(item);
+      if (item != null && this.map) {
+        this.map.delete(item);
+      }
+      delete this.store[key];
+      if (!squelch) {
+        this.removed.push(key);
+        this.debounce = Polymer.Debounce(this.debounce, this.notify.bind(this));
+      }
+      return key;
+    },
+
+    notify: function(splices) {
+      if (!splices) {
+        splices = [{
+          added: this.added,
+          removed: this.removed
+        }];
+        this.added = [];
+        this.removed = [];
+      }
+      this.callbacks.forEach(function(cb) {
+        cb(splices);
+      }, this);
+    },
+
+    observe: function(callback) {
+      this.callbacks.push(callback);
+    },
+
+    unobserve: function(callback) {
+      this.callbacks.splice(this.callbacks.indexOf(callback), 1);
+    },
+
+    getKey: function(item) {
+      if (item != null && this.map) {
+        return this.map.get(item);
+      } else {
+        return this.store.indexOf(item);      
+      }
+    },
+
+    getKeys: function() {
+      return Object.keys(this.store);
+    },
+
+    setItem: function(key, value) {
+      this.store[key] = value;
+    },
+
+    getItem: function(key) {
+      return this.store[key];
+    },
+
+    getItems: function() {
+      var items = [], store = this.store;
+      for (var key in store) {
+        items.push(store[key]);
+      }
+      return items;
+    },
+
+    applySplices: function(splices) {
+      var map = this.map;
+      var keySplices = [];
+      for (var i=0; i<splices.length; i++) {
+        var j, o, key, s = splices[i];
+        // Removed keys
+        var removed = [];
+        for (j=0; j<s.removed.length; j++) {
+          o = s.removed[j];
+          key = this.remove(o, true);
+          removed.push(key);
+        }
+        // Added keys
+        var added = [];
+        for (j=0; j<s.addedCount; j++) {
+          o = this.userArray[s.index + j];
+          key = this.add(o, true);
+          added.push(key);
+        }
+        // Record splice
+        keySplices.push({
+          index: s.index,
+          removed: removed,
+          added: added
+        });
+      }
+      this.notify(keySplices);
+    }
+
+  };
+
+  Polymer.Collection.get = function(userArray, noObserve) {
+    return Polymer._collections.get(userArray) 
+      || new Polymer.Collection(userArray, noObserve);
+  };
+
+</script>
+<script>
+
+  Polymer({
+
+    is: 'x-repeat',
+    extends: 'template',
+
+    properties: {
+
+      /**
+       * An array containing items determining how many instances of the template
+       * to stamp and that that each template instance should bind to.
+       */
+      items: {
+        type: Array
+      },
+
+      /**
+       * A function that should determine the sort order of the items.  This
+       * property should either be provided as a string, indicating a method
+       * name on the element's host, or else be an actual function.  The
+       * function should match the sort function passed to `Array.sort`.
+       * Using a sort function has no effect on the underlying `items` array.
+       */
+      sort: {
+        type: Function,
+        observer: '_sortChanged'
+      },
+
+      /**
+       * A function that can be used to filter items out of the view.  This
+       * property should either be provided as a string, indicating a method
+       * name on the element's host, or else be an actual function.  The
+       * function should match the sort function passed to `Array.filter`.
+       * Using a filter function has no effect on the underlying `items` array.
+       */
+      filter: {
+        type: Function,
+        observer: '_filterChanged'
+      },
+
+      /**
+       * When using a `filter` or `sort` function, the `observe` property
+       * should be set to a space-separated list of the names of item
+       * sub-fields that should trigger a re-sort or re-filter when changed.
+       * These should generally be fields of `item` that the sort or filter
+       * function depends on.
+       */
+      observe: {
+        type: String,
+        observer: '_observeChanged'
+      },
+
+      /**
+       * When using a `filter` or `sort` function, the `delay` property
+       * determines a debounce time after a change to observed item
+       * properties that must pass before the filter or sort is re-run.
+       * This is useful in rate-limiting shuffing of the view when
+       * item changes may be frequent.
+       */
+      delay: Number
+    },
+
+    mixins: [
+      Polymer.Templatizer
+    ],
+
+    observers: {
+      'items.*': '_itemsChanged'
+    },
+
+    created: function() {
+      this.boundCollectionObserver = this.render.bind(this);
+    },
+
+    ready: function() {
+      // Templatizing (generating the instance constructor) needs to wait
+      // until attached, since it may not have its template content handed
+      // back to it until then, following its host template stamping
+      if (!this.ctor) {
+        this.templatize(this);
+      }
+      if (this._renderPendingAttach) {
+        this._renderPendingAttach = false; 
+        this.render();
+      }
+    },
+
+    _sortChanged: function() {
+      this._sortFn = this.sort && (typeof this.sort == 'function' ? 
+        this.sort : this.host[this.sort].bind(this.host));
+      this.debounce('render', this.render);
+    },
+
+    _filterChanged: function() {
+      this._filterFn = this.filter && (typeof this.filter == 'function' ? 
+        this.filter : this.host[this.filter].bind(this.host));
+      this.debounce('render', this.render);
+    },
+
+    _observeChanged: function() {
+      this._observePaths = this.observe && 
+        this.observe.replace('.*', '.').split(' ');
+    },
+
+    _itemsChanged: function(items, old, path) {
+      if (path) {
+        this._notifyElement(path, items);
+        this._checkObservedPaths(path);
+      } else {
+        if (old) {
+          this._unobserveCollection(old);
+        }
+        if (items) {
+          this._observeCollection(items);
+          this.debounce('render', this.render);
+        }
+      }          
+    },
+
+    _checkObservedPaths: function(path) {
+      if (this._observePaths && path.indexOf('items.') === 0) {
+        path = path.substring(path.indexOf('.', 6) + 1);
+        var paths = this._observePaths;
+        for (var i=0; i<paths.length; i++) {
+          if (path.indexOf(paths[i]) === 0) {
+            this.debounce('render', this.render, this.delay);
+            return;
+          }
+        }
+      }
+    },
+
+    _observeCollection: function(items) {
+      this.collection = Array.isArray(items) ? Polymer.Collection.get(items) : items;
+      this.collection.observe(this.boundCollectionObserver);
+    },
+
+    _unobserveCollection: function(items) {
+      var collection = Polymer.Collection.get(items);
+      collection.unobserve(this.boundCollectionObserver);
+    },
+
+    render: function(splices) {
+      // TODO(kschaaf): should actually queue splices also
+      if (!this.isAttached) {
+        // Render must follow attachment
+        this._renderPendingAttach = true;
+        return;
+      }
+      this._render(splices);
+    },
+
+    _render: function(splices) {
+      var c = this.collection;
+      if (splices) {
+        if (this._sortFn || splices[0].index == null) {
+          this._applySplicesViewSort(splices);
+        } else {
+          this._applySplicesArraySort(splices);
+        }
+      } else {
+        this._sortAndFilter();
+      }
+      var rowForKey = this._rowForKey = {};
+      var keys = this._orderedKeys;
+      // Assign items and keys
+      this.rows = this.rows || [];
+      for (var i=0; i<keys.length; i++) {
+        var key = keys[i];
+        var item = c.getItem(key);
+        var row = this.rows[i];
+        if (!row) {
+          this.rows.push(row = this._insertRow(i, null, item));
+        }
+        row.item = item;
+        row.key = key;
+        rowForKey[key] = i;
+      }
+      // Remove extra
+      for (; i<this.rows.length; i++) {
+        this._detachRow(i);
+      }
+      this.rows.splice(keys.length, this.rows.length-keys.length);
+    },
+
+    _sortAndFilter: function() {
+      var c = this.collection;
+      this._orderedKeys = c.getKeys();
+      // Filter
+      if (this._filterFn) {
+        this._orderedKeys = this._orderedKeys.filter(function(a) {
+          return this._filterFn(c.getItem(a));
+        }, this);
+      }
+      // Sort
+      if (this._sortFn) {
+        this._orderedKeys.sort(function(a, b) {
+          return this._sortFn(c.getItem(a), c.getItem(b));
+        }.bind(this));
+      }
+    },
+
+    _keySort: function(a, b) {
+      return this.collection.getKey(a) - this.collection.getKey(b);
+    },
+
+    _applySplicesViewSort: function(splices) {
+      var c = this.collection;
+      var keys = this._orderedKeys;
+      var rows = this.rows;
+      var removedRows = [];
+      var addedKeys = [];
+      var pool = [];
+      var sortFn = this._sortFn || this._keySort.bind(this);
+      splices.forEach(function(s) {
+        // Collect all removed row idx's
+        for (var i=0; i<s.removed.length; i++) {
+          var idx = this._rowForKey[s.removed[i]];
+          if (idx != null) {
+            removedRows.push(idx);
+          }
+        }
+        // Collect all added keys
+        for (i=0; i<s.added.length; i++) {
+          addedKeys.push(s.added[i]);
+        }
+      }, this);
+      if (removedRows.length) {
+        // Sort removed rows idx's
+        removedRows.sort();
+        // Remove keys and pool rows (backwards, so we don't invalidate rowForKey)
+        for (i=removedRows.length-1; i>=0 ; i--) {
+          var idx = removedRows[i];
+          pool.push(this._detachRow(idx));
+          rows.splice(idx, 1);
+          keys.splice(idx, 1);
+        }
+      }
+      if (addedKeys.length) {
+        // Filter added keys
+        if (this._filterFn) {
+          addedKeys = addedKeys.filter(function(a) {
+            return this._filterFn(c.getItem(a));
+          }, this);
+        }
+        // Sort added keys
+        addedKeys.sort(function(a, b) {
+          return this.sortFn(c.getItem(a), c.getItem(b));
+        }, this);
+        // Insert new rows using sort (from pool or newly created)
+        var start = 0;
+        for (i=0; i<addedKeys.length; i++) {
+          start = this._insertRowIntoViewSort(start, addedKeys[i], pool);
+        }          
+      }
+    },
+
+    _insertRowIntoViewSort: function(start, key, pool) {
+      var c = this.collection;
+      var item = c.getItem(key);
+      var end = this.rows.length - 1;
+      var idx = -1;
+      var sortFn = this._sortFn || this._keySort.bind(this);
+      // Binary search for insertion point
+      while (start <= end) {
+        var mid = (start + end) >> 1;
+        var midKey = this._orderedKeys[mid];
+        var cmp = sortFn(c.getItem(midKey), item);
+        if (cmp < 0) {
+          start = mid + 1;
+        } else if (cmp > 0) {
+          end = mid - 1;
+        } else {
+          idx = mid;
+          break;
+        }
+      }
+      if (idx < 0) {
+        idx = end + 1;
+      }
+      // Insert key & row at insertion point
+      this._orderedKeys.splice(idx, 0, key);
+      this.rows.splice(idx, 0, this._insertRow(idx, pool));
+      return idx;
+    },
+
+    _applySplicesArraySort: function(splices) {
+      var keys = this._orderedKeys;
+      var pool = [];
+      splices.forEach(function(s) {
+        // Remove & pool rows first, to ensure we can fully reuse removed rows
+        for (var i=0; i<s.removed.length; i++) {
+          pool.push(this._detachRow(s.index + i));
+        }
+        this.rows.splice(s.index, s.removed.length);
+      }, this);
+      var c = this.collection;
+      var filterDelta = 0;
+      splices.forEach(function(s) {
+        // Filter added keys
+        var addedKeys = s.added;
+        if (this._filterFn) {
+          addedKeys = addedKeys.filter(function(a) {
+            return this._filterFn(c.getItem(a));
+          }, this);
+          filterDelta += (s.added.length - addedKeys.length);            
+        }
+        var idx = s.index - filterDelta;
+        // Apply splices to keys
+        var args = [idx, s.removed.length].concat(addedKeys);
+        keys.splice.apply(keys, args);
+        // Insert new rows (from pool or newly created)
+        var addedRows = [];
+        for (i=0; i<s.added.length; i++) {
+          addedRows.push(this._insertRow(idx + i, pool));
+        }
+        args = [s.index, 0].concat(addedRows);
+        this.rows.splice.apply(this.rows, args);
+      }, this);
+    },
+
+    _detachRow: function(idx) {
+      var row = this.rows[idx];
+      var parentNode = Polymer.dom(this).parentNode;
+      for (var i=0; i<row._children.length; i++) {
+        var el = row._children[i];
+        Polymer.dom(row.root).appendChild(el);
+      }
+      return row;
+    },
+
+    _insertRow: function(idx, pool, item) {
+      var row = (pool && pool.pop()) || this._generateRow(idx, item);
+      var beforeRow = this.rows[idx];
+      var beforeNode = beforeRow ? beforeRow._children[0] : this;
+      var parentNode = Polymer.dom(this).parentNode;
+      row.root.__styleScoped = true;
+      Polymer.dom(parentNode).insertBefore(row.root, beforeNode);
+      return row;
+    },
+
+    _generateRow: function(idx, item) {
+      var row = this.stamp({
+        item: item,
+        pathDelegate: this
+      });
+      // each row is a document fragment which is lost when we appendChild,
+      // so we have to track each child individually
+      var children = [];
+      for (var n = row.root.firstChild; n; n=n.nextSibling) {
+        children.push(n);
+        n._templateInstance = row;
+      }
+      // Since archetype overrides Base/HTMLElement, Safari complains
+      // when accessing `children`
+      row._children = children;
+      return row;
+    },
+
+    _notifyDelegatePath: function(row, path, value) {
+      this.notifyPath(path.replace('item', 'items.' + row.key), value);
+    },
+
+    _notifyElement: function(path, value) {
+      if (this._rowForKey) {
+        // 'items.'.length == 6
+        var dot = path.indexOf('.', 6);
+        var key = path.substring(6, dot < 0 ? path.length : dot);
+        var idx = this._rowForKey[key];
+        var row = this.rows[idx];
+        if (row) {
+          if (dot >= 0) {
+            path = 'item.' + path.substring(dot+1);
+            row.notifyPath(path, value, true);
+          } else {
+            row.item = value;
+          }
+        }
+      }
+    },
+
+    _instanceForElement: function(el) {
+      while (el && !el._templateInstance) {
+        el = el.parentNode;
+      }
+      return el._templateInstance;
+    },
+
+    /**
+     * Returns the item associated with a given element stamped by
+     * this `x-repeat`.
+     */
+    itemForElement: function(el) {
+      var instance = this._instanceForElement(el);
+      return instance && instance.item;
+    },
+
+    /**
+     * Returns the `Polymer.Collection` key associated with a given
+     * element stamped by this `x-repeat`.
+     */
+    keyForElement: function(el) {
+      var instance = this._instanceForElement(el);
+      return instance && instance.key;
+    },
+
+    /**
+     * Returns the index in `items` associated with a given element
+     * stamped by this `x-repeat`.
+     */
+    indexForElement: function(el) {
+      var instance = this._instanceForElement(el);
+      return this.rows.indexOf(instance);
+    }
+
+  });
+
+
+</script>
+<script>
+
+  Polymer({
+    is: 'x-array-selector',
+    
+    properties: {
+
+      /**
+       * An array containing items from which selection will be made.
+       */
+      items: {
+        type: Array,
+        observer: '_itemsChanged'
+      },
+
+      /**
+       * When `multi` is true, this is an array that contains any selected.
+       * When `multi` is false, this is the currently selected item, or `null`
+       * if no item is selected.
+       */
+      selected: {
+        type: Object,
+        notify: true
+      },
+
+      /**
+       * When `true`, calling `select` on an item that is already selected
+       * will deselect the item.
+       */
+      toggle: Boolean,
+
+      /**
+       * When `true`, multiple items may be selected at once (in this case,
+       * `selected` is an array of currently selected items).  When `false`,
+       * only one item may be selected at a time.
+       */
+      multi: Boolean
+    },
+    
+    _itemsChanged: function() {
+      // Unbind previous selection
+      if (Array.isArray(this.selected)) {
+        for (var i=0; i<this.selected.length; i++) {
+          this.unbindPaths('selected.' + i);
+        }
+      } else {
+        this.unbindPaths('selected');
+      }
+      // Initialize selection
+      if (this.multi) {
+        this.selected = [];
+      } else {
+        this.selected = null;
+      }
+    },
+
+    /**
+     * Deselects the given item if it is already selected.
+     */
+    deselect: function(item) {
+      if (this.multi) {
+        var scol = Polymer.Collection.get(this.selected);
+        // var skey = scol.getKey(item);
+        // if (skey >= 0) {
+        var sidx = this.selected.indexOf(item);
+        if (sidx >= 0) {
+          var skey = scol.getKey(item);
+          this.selected.splice(sidx, 1);
+          // scol.remove(item);
+          this.unbindPaths('selected.' + skey);
+          return true;
+        }
+      } else {
+        this.selected = null;
+        this.unbindPaths('selected');
+      }
+    },
+
+    /**
+     * Selects the given item.  When `toggle` is true, this will automatically
+     * deselect the item if already selected.
+     */
+    select: function(item) {
+      var icol = Polymer.Collection.get(this.items);
+      var key = icol.getKey(item);
+      if (this.multi) {
+        // var sidx = this.selected.indexOf(item);
+        // if (sidx < 0) {
+        var scol = Polymer.Collection.get(this.selected);
+        var skey = scol.getKey(item);
+        if (skey >= 0) {
+          this.deselect(item);
+        } else if (this.toggle) {
+          this.selected.push(item);
+          // this.bindPaths('selected.' + sidx, 'items.' + skey);
+          // skey = Polymer.Collection.get(this.selected).add(item);
+          this.async(function() {
+            skey = scol.getKey(item);
+            this.bindPaths('selected.' + skey, 'items.' + key);
+          });
+        }
+      } else {
+        if (this.toggle && item == this.selected) {
+          this.deselect();
+        } else {
+          this.bindPaths('selected', 'items.' + key);
+          this.selected = item;
+        }
+      }
+    }
+
+  });
+
+</script>
+</head><body></body></html>

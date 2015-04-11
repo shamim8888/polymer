@@ -1,0 +1,803 @@
+<!--
+@license
+Copyright (c) 2014 The Polymer Project Authors. All rights reserved.
+This code may only be used under the BSD style license found at http://polymer.github.io/LICENSE.txt
+The complete set of authors may be found at http://polymer.github.io/AUTHORS.txt
+The complete set of contributors may be found at http://polymer.github.io/CONTRIBUTORS.txt
+Code distributed by Google as part of the polymer project is also
+subject to an additional IP rights grant found at http://polymer.github.io/PATENTS.txt
+--><html><head><meta charset="UTF-8"><script>
+
+  Polymer = {
+    Settings: (function() {
+      // NOTE: Users must currently opt into using ShadowDOM. They do so by doing:
+      // Polymer = {dom: 'shadow'};
+      // TODO(sorvell): Decide if this should be auto-use when available.
+      // TODO(sorvell): if SD is auto-use, then the flag above should be something
+      // like: Polymer = {dom: 'shady'}
+      
+      // via Polymer object
+      var user = window.Polymer || {};
+
+      // via url
+      location.search.slice(1).split('&').forEach(function(o) {
+        o = o.split('=');
+        o[0] && (user[o[0]] = o[1] || true);
+      });
+
+      var wantShadow = (user.dom === 'shadow');
+      var hasShadow = Boolean(Element.prototype.createShadowRoot);
+      var nativeShadow = hasShadow && !window.ShadowDOMPolyfill;
+      var useShadow = wantShadow && hasShadow;
+
+      var hasNativeImports = Boolean('import' in document.createElement('link'));
+      var useNativeImports = hasNativeImports;
+
+      var useNativeCustomElements = (!window.CustomElements ||
+        window.CustomElements.useNative);
+
+      return {
+        wantShadow: wantShadow,
+        hasShadow: hasShadow,
+        nativeShadow: nativeShadow,
+        useShadow: useShadow,
+        useNativeShadow: useShadow && nativeShadow,
+        useNativeImports: useNativeImports,
+        useNativeCustomElements: useNativeCustomElements
+      };
+    })()
+  };
+
+</script><script>
+
+  // until ES6 modules become standard, we follow Occam and simply stake out 
+  // a global namespace
+
+  // Polymer is a Function, but of course this is also an Object, so we 
+  // hang various other objects off of Polymer.*
+  (function() {
+    var userPolymer = window.Polymer;
+    
+    window.Polymer = function(prototype) {
+      var ctor = desugar(prototype);
+      // native Custom Elements treats 'undefined' extends property
+      // as valued, the property must not exist to be ignored
+      var options = {
+        prototype: ctor.prototype
+      };
+      if (prototype.extends) {
+        options.extends = prototype.extends;
+      }
+      Polymer.telemetry._registrate(prototype);
+      document.registerElement(prototype.is, options);
+      return ctor;
+    };
+
+    var desugar = function(prototype) {
+      prototype = Polymer.Base.chainObject(prototype, Polymer.Base);
+      prototype.registerCallback();
+      return prototype.constructor;
+    };
+
+    window.Polymer = Polymer;
+
+    if (userPolymer) {
+      for (var i in userPolymer) {
+        Polymer[i] = userPolymer[i];
+      }
+    }
+
+    Polymer.Class = desugar;
+
+  })();
+  /*
+  // Raw usage
+  [ctor =] Polymer.Class(prototype);
+  document.registerElement(name, ctor);
+  
+  // Simplified usage
+  [ctor = ] Polymer(prototype);
+  */
+
+  // telemetry: statistics, logging, and debug
+
+  Polymer.telemetry = {
+    registrations: [],
+    _regLog: function(prototype) {
+      console.log('[' + prototype.is + ']: registered')
+    },
+    _registrate: function(prototype) {
+      this.registrations.push(prototype);
+      Polymer.log && this._regLog(prototype);
+    },
+    dumpRegistrations: function() {
+      this.registrations.forEach(this._regLog);
+    }
+  };
+
+</script>
+
+<script>
+
+  // a tiny bit of sugar for `document.currentScript.ownerDocument`
+  Object.defineProperty(window, 'currentImport', {
+    enumerable: true,
+    configurable: true,
+    get: function() {
+      return (document._currentScript || document.currentScript).ownerDocument;
+    }
+  });
+
+</script>
+<script>
+
+  Polymer.Base = {
+
+    // (semi-)pluggable features for Base
+    addFeature: function(feature) {
+      this.extend(this, feature);
+    },
+
+    registerCallback: function() {
+      this.registerFeatures();  // abstract
+      this.registered();
+    },
+
+    registered: function() {
+      // for overriding
+      // `this` context is a prototype, not an instance
+    },
+
+    createdCallback: function() {
+      Polymer.telemetry.instanceCount++;
+      this.root = this;
+      this.beforeCreated();
+      this.created();
+      this.afterCreated();
+      this.initFeatures(); // abstract
+    },
+
+    beforeCreated: function() {
+      // for overriding
+    },
+
+    created: function() {
+      // for overriding
+    },
+
+    afterCreated: function() {
+      // for overriding
+    },
+
+    attachedCallback: function() {
+      this.isAttached = true;
+      // reserved for canonical behavior
+      this.attached();
+    },
+
+    attached: function() {
+      // for overriding
+    },
+
+    detachedCallback: function() {
+      this.isAttached = false;
+      // reserved for canonical behavior
+      this.detached();
+    },
+
+    detached: function() {
+      // for overriding
+    },
+
+    attributeChangedCallback: function(name) {
+      this.setAttributeToProperty(this, name);
+      // reserved for canonical behavior
+      this.attributeChanged.apply(this, arguments);
+    },
+
+    attributeChanged: function() {
+      // for overriding
+    },
+
+    // copy own properties from `api` to `prototype`
+    extend: function(prototype, api) {
+      if (prototype && api) {
+        Object.getOwnPropertyNames(api).forEach(function(n) {
+          var pd = Object.getOwnPropertyDescriptor(api, n);
+          if (pd) {
+            Object.defineProperty(prototype, n, pd);
+          }
+        });
+      }
+      return prototype || api;
+    }
+
+  };
+
+  if (Object.__proto__) {
+    Polymer.Base.chainObject = function(object, inherited) {
+      if (object && inherited && object !== inherited) {
+        object.__proto__ = inherited;
+      }
+      return object;
+    };
+  } else {
+    Polymer.Base.chainObject = function(object, inherited) {
+      if (object && inherited && object !== inherited) {
+        var chained = Object.create(inherited);
+        object = Polymer.Base.extend(chained, object);
+      }
+      return object;
+    };
+  }
+
+  Polymer.Base = Polymer.Base.chainObject(Polymer.Base, HTMLElement.prototype);
+
+  // TODO(sjmiles): ad hoc telemetry
+  Polymer.telemetry.instanceCount = 0;
+
+</script>
+<script>
+
+(function() {
+
+  var modules = {};
+
+  var DomModule = function() {
+    return document.createElement('dom-module');
+  };
+
+  DomModule.prototype = Object.create(HTMLElement.prototype);
+
+  DomModule.prototype.constructor = DomModule;
+
+  DomModule.prototype.createdCallback = function() {
+    var id = this.id || this.getAttribute('name') || this.getAttribute('is');
+    if (id) {
+      this.id = id;
+      modules[id] = this;
+    }
+  };
+
+  DomModule.prototype.import = function(id, slctr) {
+    var m = modules[id];
+    if (!m) {
+      // If polyfilling, a script can run before a dom-module element
+      // is upgraded. We force the containing document to upgrade
+      // and try again to workaround this polyfill limitation.
+      forceDocumentUpgrade();
+      m = modules[id];
+    }
+    if (m && slctr) {
+      m = m.querySelector(slctr);
+    }
+    return m;
+  };
+
+  // NOTE: HTMLImports polyfill does not
+  // block scripts on upgrading elements. However, we want to ensure that
+  // any dom-module in the tree is available prior to a subsequent script
+  // processing.
+  // Therefore, we force any dom-modules in the tree to upgrade when dom-module
+  // is registered by temporarily setting CE polyfill to crawl the entire
+  // imports tree. (Note: this should only upgrade any imports that have been
+  // loaded by this point. In addition the HTMLImports polyfill should be
+  // changed to upgrade elements prior to running any scripts.)
+  var cePolyfill = window.CustomElements && !CustomElements.useNative;
+  if (cePolyfill) {
+    var ready = CustomElements.ready;
+    CustomElements.ready = true;
+  }
+  document.registerElement('dom-module', DomModule);
+  if (cePolyfill) {
+    CustomElements.ready = ready;
+  }
+
+  function forceDocumentUpgrade() {
+    if (cePolyfill) {
+      var script = document._currentScript || document.currentScript;
+      if (script) {
+        CustomElements.upgradeAll(script.ownerDocument);
+      }
+    }
+  }
+
+})();
+
+</script><script>
+
+  Polymer.Base.addFeature({
+
+    _prepIs: function() {
+      if (!this.is) {
+        var module =
+          (document._currentScript || document.currentScript).parentNode;
+        if (module.localName === 'dom-module') {
+          var id = module.id || module.getAttribute('name')
+            || module.getAttribute('is')
+          this.is = id;
+        }
+      }
+    }
+
+  });
+
+</script>
+<script>
+
+  /**
+   * Automatically extend using objects referenced in `mixins` array. 
+   * 
+   *     Polymer({
+   *     
+   *       mixins: [
+   *         someMixinObject
+   *       ]
+   *     
+   *       ...
+   *     
+   *     });
+   * 
+   * @class base feature: mixins
+   */
+
+  Polymer.Base.addFeature({
+
+    _prepMixins: function() {
+      if (this.mixins) {
+        this.mixins.forEach(function(m) {
+          Polymer.Base.extend(this, m);
+        }, this);
+      }
+    }
+
+  });
+
+</script>
+<script>
+
+  /**
+   * Support `extends` property (for type-extension only).
+   *
+   * If the mixin is String-valued, the corresponding Polymer module
+   * is mixed in.
+   *
+   *     Polymer({
+   *       is: 'pro-input',
+   *       extends: 'input',
+   *       ...
+   *     });
+   * 
+   * Type-extension objects are created using `is` notation in HTML, or via
+   * the secondary argument to `document.createElement` (the type-extension
+   * rules are part of the Custom Elements specification, not something 
+   * created by Polymer). 
+   * 
+   * Example:
+   * 
+   *     <!-- right: creates a pro-input element -->
+   *     <input is="pro-input">
+   *   
+   *     <!-- wrong: creates an unknown element -->
+   *     <pro-input>  
+   * 
+   *     <script>
+   *        // right: creates a pro-input element
+   *        var elt = document.createElement('input', 'pro-input');
+   * 
+   *        // wrong: creates an unknown element
+   *        var elt = document.createElement('pro-input');
+   *     <\script>
+   *
+   *   @class base feature: extends
+   */
+
+  Polymer.Base.addFeature({
+
+    _prepExtends: function() {
+      if (this.extends) {
+        this.__proto__ = this.getExtendedPrototype(this.extends);
+      }
+    },
+
+    getExtendedPrototype: function(tag) {
+      return this.getExtendedNativePrototype(tag);
+    },
+
+    nativePrototypes: {}, // static
+
+    getExtendedNativePrototype: function(tag) {
+      var p = this.nativePrototypes[tag];
+      if (!p) {
+        var np = this.getNativePrototype(tag);
+        p = this.extend(Object.create(np), Polymer.Base);
+        this.nativePrototypes[tag] = p;
+      }
+      return p;
+    },
+
+    getNativePrototype: function(tag) {
+      // TODO(sjmiles): sad necessity
+      return Object.getPrototypeOf(document.createElement(tag));
+    }
+
+  });
+
+</script>
+<script>
+
+  /**
+   * Generates a boilerplate constructor.
+   * 
+   *     XFoo = Polymer({
+   *       is: 'x-foo'
+   *     });
+   *     ASSERT(new XFoo() instanceof XFoo);
+   *  
+   * You can supply a custom constructor on the prototype. But remember that 
+   * this constructor will only run if invoked **manually**. Elements created
+   * via `document.createElement` or from HTML _will not invoke this method_.
+   * 
+   * Instead, we reuse the concept of `constructor` for a factory method which 
+   * can take arguments. 
+   * 
+   *     MyFoo = Polymer({
+   *       is: 'my-foo',
+   *       constructor: function(foo) {
+   *         this.foo = foo;
+   *       }
+   *       ...
+   *     });
+   * 
+   * @class base feature: constructor
+   */
+
+  Polymer.Base.addFeature({
+
+    // registration-time
+
+    _prepConstructor: function() {
+      // capture user-supplied `constructor`
+      if (this.hasOwnProperty('constructor')) {
+        this._userConstructor = this.constructor;
+      }
+      // support both possible `createElement` signatures
+      this._factoryArgs = this.extends ? [this.extends, this.is] : [this.is];
+      // thunk the constructor to delegate allocation to `createElement`
+      var ctor = function() { 
+        return this._factory(arguments); 
+      };
+      if (this.hasOwnProperty('extends')) {
+        ctor.extends = this.extends; 
+      }
+      // ensure constructor is set. The `constructor` property is
+      // not writable on Safari; note: Chrome requires the property
+      // to be configurable.
+      Object.defineProperty(this, 'constructor', {value: ctor, 
+        writable: true, configurable: true});
+      ctor.prototype = this;
+    },
+
+    _factory: function(args) {
+      var elt = document.createElement.apply(document, this._factoryArgs);
+      if (this._userConstructor) {
+        this._userConstructor.apply(elt, args);
+      }
+      return elt;
+    }
+
+  });
+
+</script>
+<script>
+
+  /**
+   * Define property metadata.
+   *
+   *     properties: {
+   *       <property>: <Type || Object>,
+   *       ...
+   *     }
+   * 
+   * Example:
+   * 
+   *     properties: {
+   *       // `foo` property can be assigned via attribute, will be deserialized to
+   *       // the specified data-type. All `properties` properties have this behavior.
+   *       foo: String,
+   *
+   *       // `bar` property has additional behavior specifiers.
+   *       //   type: as above, type for (de-)serialization
+   *       //   notify: true to send a signal when a value is set to this property
+   *       //   reflectToAttribute: true to serialize the property to an attribute
+   *       //   readOnly: if true, the property has no setter
+   *       bar: {
+   *         type: Boolean,
+   *         notify: true
+   *       }
+   *     }
+   *
+   * By itself the properties feature doesn't do anything but provide property
+   * information. Other features use this information to control behavior.
+   *
+   * The `type` information is used by the `attributes` feature to convert
+   * String values in attributes to typed properties. The `bind` feature uses 
+   * property information to control property access.
+   *
+   * Marking a property as `notify` causes a change in the property to
+   * fire a non-bubbling event called `<property>-changed`. Elements that
+   * have enabled two-way binding to the property use this event to
+   * observe changes.
+   *
+   * `readOnly` properties have a getter, but no setter. To set a read-only
+   * property, use the private setter method `_set_<property>(value)`.
+   *
+   * @class base feature: properties
+   */
+
+  // null object
+  Polymer.nob = Object.create(null);
+  
+  Polymer.Base.addFeature({
+
+    properties: {
+    },
+
+    getPropertyInfo: function(property) {
+      return this._getPropertyInfo(property, this.properties);
+    },
+
+    _getPropertyInfo: function(property, properties) {
+      var p = properties[property];
+      if (typeof(p) === 'function') {
+        p = properties[property] = {
+          type: p
+        };
+      }
+      return p || Polymer.nob;
+    },
+
+    getPropertyType: function(property) {
+      return this.getPropertyInfo(property).type;
+    },
+
+    isReadOnlyProperty: function(property) {
+      return this.getPropertyInfo(property).readOnly;
+    },
+
+    isNotifyProperty: function(property) {
+      return this.getPropertyInfo(property).notify;
+    },
+
+    isReflectedProperty: function(property) {
+      return this.getPropertyInfo(property).reflectToAttribute;
+    }
+
+  });
+
+</script>
+<script>
+
+  Polymer.CaseMap = {
+
+    _caseMap: {},
+
+    dashToCamelCase: function(dash) {
+      var mapped = Polymer.CaseMap._caseMap[dash];
+      if (mapped) {
+        return mapped;
+      }
+      // TODO(sjmiles): is rejection test actually helping perf?
+      if (dash.indexOf('-') < 0) {
+        return Polymer.CaseMap._caseMap[dash] = dash;
+      }
+      return Polymer.CaseMap._caseMap[dash] = dash.replace(/-([a-z])/g, 
+        function(m) {
+          return m[1].toUpperCase(); 
+        }
+      );
+    },
+
+    camelToDashCase: function(camel) {
+      var mapped = Polymer.CaseMap._caseMap[camel];
+      if (mapped) {
+        return mapped;
+      }
+      return Polymer.CaseMap._caseMap[camel] = camel.replace(/([a-z][A-Z])/g, 
+        function (g) { 
+          return g[0] + '-' + g[1].toLowerCase() 
+        }
+      );
+    }
+
+  };
+
+</script>
+<script>
+
+  /**
+   * Support for `hostAttributes` property.
+   *
+   *     hostAttributes: 'block vertical layout'
+   *
+   * `hostAttributes` is a space-delimited string of boolean attribute names to
+   * set true on each instance.
+   *
+   * Support for mapping attributes to properties.
+   *
+   * Properties that are configured in `properties` with a type are mapped
+   * to attributes.
+   *
+   * A value set in an attribute is deserialized into the specified
+   * data-type and stored into the matching property.
+   *
+   * Example:
+   *
+   *     properties: {
+   *       // values set to index attribute are converted to Number and propagated
+   *       // to index property
+   *       index: Number,
+   *       // values set to label attribute are propagated to index property
+   *       label: String
+   *     }
+   *
+   * Types supported for deserialization:
+   *
+   * - Number
+   * - Boolean
+   * - String
+   * - Object (JSON)
+   * - Array (JSON)
+   * - Date
+   *
+   * This feature implements `attributeChanged` to support automatic
+   * propagation of attribute values at run-time. If you override
+   * `attributeChanged` be sure to call this base class method
+   * if you also want the standard behavior.
+   *
+   * @class base feature: attributes
+   */
+
+  Polymer.Base.addFeature({
+
+    _marshalAttributes: function() {
+      this._takeAttributes();
+      this._installHostAttributes(this.hostAttributes);
+    },
+
+    _installHostAttributes: function(attributes) {
+      if (attributes) {
+        this.applyAttributes(this, attributes);
+      }
+    },
+
+    applyAttributes: function(node, attr$) {
+      for (var n in attr$) {
+        this.serializeValueToAttribute(attr$[n], n, this);
+      }
+    },
+
+    _takeAttributes: function() {
+      this._takeAttributesToModel(this);
+    },
+
+    _takeAttributesToModel: function(model) {
+      for (var propName in this.properties) {
+        var attrName = Polymer.CaseMap.camelToDashCase(propName);
+        if (this.hasAttribute(attrName)) {
+          var val = this.getAttribute(attrName);
+          var type = this.getPropertyType(propName);
+          model[propName] = this.deserialize(val, type);
+        }
+      }
+    },
+
+    setAttributeToProperty: function(model, attrName) {
+      // Don't deserialize back to property if currently reflecting
+      if (!this._serializing) {
+        var propName = Polymer.CaseMap.dashToCamelCase(attrName);
+        if (propName in this.properties) {
+          var type = this.getPropertyType(propName);
+          var val = this.getAttribute(attrName);
+          model[propName] = this.deserialize(val, type);
+        }
+      }
+    },
+
+    _serializing: false,
+    reflectPropertyToAttribute: function(name) {
+      this._serializing = true;
+      this.serializeValueToAttribute(this[name],
+        Polymer.CaseMap.camelToDashCase(name));
+      this._serializing = false;
+    },
+
+    serializeValueToAttribute: function(value, attribute, node) {
+      var str = this.serialize(value);
+      (node || this)
+        [str === undefined ? 'removeAttribute' : 'setAttribute']
+          (attribute, str);
+    },
+
+    deserialize: function(value, type) {
+      switch (type) {
+        case Number:
+          value = Number(value);
+          break;
+
+        case Boolean:
+          value = (value !== null);
+          break;
+
+        case Object:
+          try {
+            value = JSON.parse(value);
+          } catch(x) {
+            // allow non-JSON literals like Strings and Numbers
+          }
+          break;
+
+        case Array:
+          try {
+            value = JSON.parse(value);
+          } catch(x) {
+            value = null;
+            console.warn('Polymer::Attributes: couldn`t decode Array as JSON');
+          }
+          break;
+
+        case Date:
+          value = new Date(value);
+          break;
+
+        case String:
+        default:
+          break;
+      }
+      return value;
+    },
+
+    serialize: function(value) {
+      switch (typeof value) {
+        case 'boolean':
+          return value ? '' : undefined;
+
+        case 'object':
+          if (value instanceof Date) {
+            return value;
+          } else if (value) {
+            try {
+              return JSON.stringify(value);
+            } catch(x) {
+              return '';
+            }
+          }
+
+        default:
+          return value != null ? value : undefined;
+      }
+    }
+
+  });
+
+</script>
+<script>
+
+  Polymer.Base.addFeature({
+
+    registerFeatures: function() {
+      this._prepIs();
+      this._prepMixins();
+      this._prepExtends();
+      this._prepConstructor();
+    },
+
+    initFeatures: function() {
+      this._marshalAttributes();
+    }
+
+  });
+
+</script>
+
+</head><body></body></html>
